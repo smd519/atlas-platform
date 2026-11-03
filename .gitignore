@@ -224,3 +224,7 @@ _documentation/*
 docs/architecture/platform-structure.md
 docs/architecture/dependency-rules.md
 docs/architecture/module-governance.md
+
+# environment files
+.envrc
+.env.*
