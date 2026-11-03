@@ -218,3 +218,9 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Personal
+./_documentation
+docs/architecture/platform-structure.md
+docs/architecture/dependency-rules.md
+docs/architecture/module-governance.md
