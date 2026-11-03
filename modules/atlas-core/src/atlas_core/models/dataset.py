@@ -1,6 +1,9 @@
+from datetime import datetime
+
 from pydantic import BaseModel
 
 
-class Dataset(BaseModel):
+class Execution(BaseModel):
     id: str
-    name: str
+    started_at: datetime
+    status: str
