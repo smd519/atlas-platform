@@ -2,7 +2,6 @@ from abc import ABC, abstractmethod
 
 
 class AuthStrategy(ABC):
-
     @abstractmethod
     def get_headers(self) -> dict[str, str]:
         pass

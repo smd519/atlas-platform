@@ -1,12 +1,16 @@
-from atlas_core.exceptions import AtlasError
+"""Connector-specific exception hierarchy."""
+
+from __future__ import annotations
+
+from atlas_core import ConnectorError as CoreConnectorError
 
 
-class ConnectorError(AtlasError):
+class ConnectorError(CoreConnectorError):
     """Base connector exception."""
 
 
 class ConnectorConfigurationError(ConnectorError):
-    """Connector configuration is invalid."""
+    """Connector configuration is invalid or unregistered."""
 
 
 class ConnectorConnectionError(ConnectorError):
@@ -23,3 +27,13 @@ class ConnectorExtractionError(ConnectorError):
 
 class ParserError(ConnectorError):
     """Payload parsing failed."""
+
+
+__all__ = [
+    "ConnectorAuthenticationError",
+    "ConnectorConfigurationError",
+    "ConnectorConnectionError",
+    "ConnectorError",
+    "ConnectorExtractionError",
+    "ParserError",
+]

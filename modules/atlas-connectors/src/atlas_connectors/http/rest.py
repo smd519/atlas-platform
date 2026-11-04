@@ -1,26 +1,152 @@
-import httpx
+"""REST API connector and standard Connector contract adapter."""
 
+from __future__ import annotations
+
+from typing import Any
+
+import httpx
+from atlas_core import Connector
+
+from atlas_connectors.exceptions import (
+    ConnectorAuthenticationError,
+    ConnectorConfigurationError,
+    ConnectorConnectionError,
+    ConnectorExtractionError,
+)
 from atlas_connectors.http.auth import AuthStrategy
 
 
-class RestConnector:
+class RestConnector(Connector):
+    """HTTP REST connector supporting direct ``.get()`` calls and the ``Connector`` contract."""
+
     def __init__(
         self,
         base_url: str,
         auth: AuthStrategy | None = None,
-    ):
-        self.base_url = base_url
+        *,
+        endpoint: str = "",
+        timeout: float = 60.0,
+    ) -> None:
+        cleaned_url = base_url.strip() if isinstance(base_url, str) else ""
+        if not cleaned_url:
+            raise ConnectorConfigurationError("RestConnector requires a non-empty 'base_url'.")
+        if not cleaned_url.startswith(("http://", "https://")):
+            raise ConnectorConfigurationError(
+                f"RestConnector 'base_url' must start with http:// or https://, got '{base_url}'."
+            )
+        self.base_url = cleaned_url.rstrip("/")
         self.auth = auth
+        self.endpoint = endpoint
+        self.timeout = timeout
 
-    def get(self, endpoint: str) -> dict:
+    @property
+    def source_name(self) -> str:
+        """Return the configured REST endpoint URL."""
+        if self.endpoint:
+            ep = self.endpoint if self.endpoint.startswith("/") else f"/{self.endpoint}"
+            return f"{self.base_url}{ep}"
+        return self.base_url
+
+    def validate_connection(self) -> bool:
+        """Validate that the REST base URL is well-formed and reachable if probed."""
+        return bool(self.base_url.startswith(("http://", "https://")))
+
+    def get(self, endpoint: str = "") -> Any:
+        """Execute an HTTP GET request against ``endpoint`` and return parsed JSON."""
         headers = self.auth.get_headers() if self.auth else {}
+        target_ep = endpoint or self.endpoint
+        if target_ep and not target_ep.startswith("/"):
+            url = f"{self.base_url}/{target_ep}"
+        else:
+            url = f"{self.base_url}{target_ep}"
 
-        response = httpx.get(
-            f"{self.base_url}{endpoint}",
-            headers=headers,
-            timeout=60,
-        )
+        try:
+            response = httpx.get(
+                url,
+                headers=headers,
+                timeout=self.timeout,
+            )
+            response.raise_for_status()
+            return response.json()
+        except httpx.HTTPStatusError as exc:
+            status_code = exc.response.status_code
+            if status_code in {401, 403}:
+                raise ConnectorAuthenticationError(
+                    f"Authentication failed with status {status_code} for '{url}'."
+                ) from exc
+            raise ConnectorExtractionError(
+                f"HTTP request failed with status {status_code} for '{url}'."
+            ) from exc
+        except httpx.RequestError as exc:
+            raise ConnectorConnectionError(
+                f"Failed to connect to REST endpoint '{url}': {exc}"
+            ) from exc
+        except ValueError as exc:
+            raise ConnectorExtractionError(
+                f"Failed to decode JSON response from '{url}': {exc}"
+            ) from exc
 
-        response.raise_for_status()
+    def extract(self, **kwargs: Any) -> Any:
+        """Execute extraction through the standard :class:`Connector` contract."""
+        endpoint = str(kwargs.get("endpoint", self.endpoint))
+        return self.get(endpoint)
 
-        return response.json()
+
+class RestConnectorAdapter(Connector):
+    """Adapter wrapping :class:`RestConnector` to expose the standard :class:`Connector` API."""
+
+    def __init__(
+        self,
+        connector: RestConnector | None = None,
+        *,
+        base_url: str | None = None,
+        auth: AuthStrategy | None = None,
+        endpoint: str = "",
+        timeout: float = 60.0,
+    ) -> None:
+        if connector is not None:
+            self._connector = connector
+        elif base_url is not None:
+            self._connector = RestConnector(
+                base_url=base_url,
+                auth=auth,
+                endpoint=endpoint,
+                timeout=timeout,
+            )
+        else:
+            raise ConnectorConfigurationError(
+                "RestConnectorAdapter requires either a 'connector' instance or 'base_url'."
+            )
+        self._default_endpoint = endpoint or self._connector.endpoint
+
+    @property
+    def connector(self) -> RestConnector:
+        """Return the wrapped :class:`RestConnector`."""
+        return self._connector
+
+    @property
+    def source_name(self) -> str:
+        """Return the source identifier for the wrapped REST connector."""
+        if self._default_endpoint:
+            ep = (
+                self._default_endpoint
+                if self._default_endpoint.startswith("/")
+                else f"/{self._default_endpoint}"
+            )
+            return f"{self._connector.base_url}{ep}"
+        return self._connector.source_name
+
+    def validate_connection(self) -> bool:
+        """Validate the wrapped REST connector configuration."""
+        return self._connector.validate_connection()
+
+    def extract(self, **kwargs: Any) -> Any:
+        """Delegate extraction to the wrapped :class:`RestConnector`."""
+        endpoint = str(kwargs.get("endpoint", self._default_endpoint))
+        return self._connector.get(endpoint)
+
+
+__all__ = [
+    "RestConnector",
+    "RestConnectorAdapter",
+]
