@@ -5,10 +5,15 @@ build-backend = "hatchling.build"
 [project]
 name = "atlas-processing"
 version = "0.1.0"
-description = ""
+description = "Configurable, engine-abstracted data transformation module for Atlas Platform."
 readme = "README.md"
 requires-python = ">=3.12,<3.14"
-dependencies = []
+dependencies = [
+    "atlas-core",
+    "atlas-storage",
+    "pandas>=3.1.0",
+    "pydantic>=2.14.2",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/atlas_processing"]
