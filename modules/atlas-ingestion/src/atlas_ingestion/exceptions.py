@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from atlas_core.exceptions import IngestionError as CoreIngestionError
+from atlas_core import IngestionError as CoreIngestionError
 
 
 class IngestionError(CoreIngestionError):

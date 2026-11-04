@@ -5,11 +5,14 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
-from atlas_core.contracts.execution import ExecutionManager
-from atlas_core.enums import ExecutionStatus
-from atlas_core.identifiers import generate_execution_id
-from atlas_core.models.execution import Execution
-from atlas_core.types import DatasetId, SourceId
+from atlas_core import (
+    DatasetId,
+    Execution,
+    ExecutionManager,
+    ExecutionStatus,
+    SourceId,
+    generate_execution_id,
+)
 from pydantic import Field
 
 from atlas_ingestion.exceptions import ExecutionTrackingError

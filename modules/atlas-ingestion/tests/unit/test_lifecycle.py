@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import pytest
-from atlas_core.enums import ExecutionStatus
+from atlas_core import ExecutionStatus
 from atlas_ingestion.exceptions import LifecycleTransitionError
 from atlas_ingestion.lifecycle import IngestionLifecycle, IngestionState
 

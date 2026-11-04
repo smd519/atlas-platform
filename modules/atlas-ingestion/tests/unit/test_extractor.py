@@ -6,17 +6,18 @@ from datetime import UTC, datetime
 from typing import Any
 
 import pytest
-from atlas_connectors.exceptions import ConnectorExtractionError
-from atlas_connectors.factory import ConnectorFactory
-from atlas_connectors.models.extraction_result import ExtractionResult
-from atlas_connectors.models.source_config import SourceConfig
-from atlas_connectors.registry import ConnectorRegistry
-from atlas_core.contracts.connector import Connector
-from atlas_core.types import DatasetId
+from atlas_connectors import (
+    ConnectorExtractionError,
+    ConnectorFactory,
+    ConnectorRegistry,
+    ExtractionResult,
+    SourceConfig,
+)
+from atlas_core import Connector, DatasetId
 from atlas_ingestion.exceptions import ExtractionError
 from atlas_ingestion.extraction.extractor import Extractor
 from atlas_ingestion.models.ingestion_request import IngestionRequest
-from atlas_storage.models.storage_location import StorageLocation
+from atlas_storage import StorageLocation
 
 
 class FakeSuccessConnector(Connector):

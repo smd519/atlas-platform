@@ -7,16 +7,18 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from atlas_connectors.exceptions import ConnectorError
-from atlas_connectors.factory import ConnectorFactory
-from atlas_connectors.files.local import LocalFileConnector
-from atlas_connectors.http.rest import RestConnector
-from atlas_connectors.models.extraction_result import ExtractionResult
-from atlas_connectors.parsers.csv import parse_csv
-from atlas_connectors.parsers.json import parse_json
-from atlas_connectors.parsers.parquet import parse_parquet
-from atlas_connectors.registry import ConnectorRegistry
-from atlas_core.contracts.connector import Connector
+from atlas_connectors import (
+    ConnectorError,
+    ConnectorFactory,
+    ConnectorRegistry,
+    ExtractionResult,
+    LocalFileConnector,
+    RestConnector,
+    parse_csv,
+    parse_json,
+    parse_parquet,
+)
+from atlas_core import Connector
 
 from atlas_ingestion.exceptions import ExtractionError
 from atlas_ingestion.models.ingestion_request import IngestionRequest
@@ -26,7 +28,7 @@ def create_default_connector_registry() -> ConnectorRegistry:
     """Create a :class:`ConnectorRegistry` populated with standard connectors."""
     registry = ConnectorRegistry()
     registry.register("local_file", LocalFileConnector)
-    registry.register("rest", RestConnector)  # type: ignore[arg-type]
+    registry.register("rest", RestConnector)
     return registry
 
 
@@ -67,29 +69,22 @@ class Extractor:
             "extracted_row_count": extraction_result.row_count,
         }
 
-    def _resolve_connector(self, request: IngestionRequest) -> Connector | Any:
-        source_cfg = request.source
-        init_kwargs = dict(source_cfg.config)
-        if source_cfg.source_type == "rest":
-            init_kwargs.pop("endpoint", None)
-
+    def _resolve_connector(self, request: IngestionRequest) -> Connector:
         try:
-            return self._factory.create(source_cfg.source_type, **init_kwargs)
+            return self._factory.from_source_config(request.source)
         except Exception as exc:
             raise ExtractionError(
-                f"Failed to resolve or initialize connector '{source_cfg.source_type}' "
-                f"for source '{source_cfg.source_id}': {exc}",
+                f"Failed to resolve or initialize connector '{request.source.source_type}' "
+                f"for source '{request.source.source_id}': {exc}",
                 request_id=request.request_id,
             ) from exc
 
     def _validate_connection_if_configured(
         self,
         request: IngestionRequest,
-        connector: Connector | Any,
+        connector: Connector,
     ) -> None:
         if not request.execution_config.validate_connection:
-            return
-        if not hasattr(connector, "validate_connection"):
             return
 
         try:
@@ -111,23 +106,11 @@ class Extractor:
     def _execute_connector(
         self,
         request: IngestionRequest,
-        connector: Connector | Any,
+        connector: Connector,
     ) -> Any:
         extract_kwargs = dict(request.execution_config.extract_kwargs)
         try:
-            if hasattr(connector, "extract"):
-                return connector.extract(**extract_kwargs)
-            if hasattr(connector, "get"):
-                endpoint = str(
-                    extract_kwargs.get(
-                        "endpoint",
-                        request.format_options.get(
-                            "endpoint",
-                            request.source.config.get("endpoint", ""),
-                        ),
-                    )
-                )
-                return connector.get(endpoint)
+            return connector.extract(**extract_kwargs)
         except ExtractionError:
             raise
         except ConnectorError as exc:
@@ -141,12 +124,6 @@ class Extractor:
                 f"'{request.source.source_id}': {exc}",
                 request_id=request.request_id,
             ) from exc
-
-        raise ExtractionError(
-            f"Connector for source '{request.source.source_id}' does not expose a "
-            "supported extraction method.",
-            request_id=request.request_id,
-        )
 
     def _normalize_extraction_result(
         self,

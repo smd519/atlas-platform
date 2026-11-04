@@ -5,12 +5,8 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from atlas_core.enums import ExecutionStatus
-from atlas_core.models.artifact import Artifact
-from atlas_core.models.result import Result
-from atlas_core.models.source import Source
-from atlas_core.types import DatasetId
-from atlas_storage.models.storage_location import StorageLocation
+from atlas_core import Artifact, DatasetId, ExecutionStatus, Result, Source
+from atlas_storage import StorageLocation
 from pydantic import Field, model_validator
 
 from atlas_ingestion.lifecycle import IngestionState

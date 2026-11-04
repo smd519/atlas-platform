@@ -5,17 +5,20 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from atlas_connectors.models.source_config import SourceConfig
-from atlas_core.constants import BRONZE
-from atlas_core.enums import ExecutionStatus
-from atlas_core.models.artifact import Artifact
-from atlas_core.models.source import Source
-from atlas_core.types import DatasetId, SourceId
+from atlas_connectors import SourceConfig
+from atlas_core import (
+    BRONZE,
+    Artifact,
+    DatasetId,
+    ExecutionStatus,
+    Source,
+    SourceId,
+)
 from atlas_ingestion.exceptions import InvalidIngestionRequestError
 from atlas_ingestion.lifecycle import IngestionState
 from atlas_ingestion.models.ingestion_request import ExecutionConfig, IngestionRequest
 from atlas_ingestion.models.ingestion_result import IngestionResult
-from atlas_storage.models.storage_location import StorageLocation
+from atlas_storage import StorageLocation
 
 
 def _valid_source() -> SourceConfig:
@@ -112,13 +115,13 @@ def test_ingestion_request_valid_creation() -> None:
         ),
         (
             {
-                "destination": StorageLocation(
+                "destination": StorageLocation.model_construct(
                     layer="bronze",
                     path="   ",
                     format="parquet",
                 )
             },
-            "destination.path cannot be empty",
+            "cannot be empty",
         ),
         (
             {

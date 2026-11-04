@@ -3,28 +3,37 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pandas as pd  # type: ignore[import-untyped]
 import pytest
-from atlas_connectors.files.local import LocalFileConnector
-from atlas_connectors.models.source_config import SourceConfig
-from atlas_connectors.registry import ConnectorRegistry
-from atlas_core.constants import BRONZE
-from atlas_core.enums import ExecutionStatus
-from atlas_core.types import DatasetId
+from atlas_connectors import (
+    ConnectorRegistry,
+    LocalFileConnector,
+    SourceConfig,
+)
+from atlas_core import (
+    BRONZE,
+    DatasetId,
+    ExecutionStatus,
+    StorageProvider,
+)
 from atlas_ingestion import (
     ExecutionConfig,
     IngestionRequest,
     IngestionService,
     IngestionState,
 )
-from atlas_storage.backends.filesystem import FileSystemBackend
-from atlas_storage.formats.csv import read_csv, write_csv
-from atlas_storage.formats.json import read_json, write_json
-from atlas_storage.formats.parquet import read_parquet, write_parquet
-from atlas_storage.manager import StorageManager
-from atlas_storage.models.storage_location import StorageLocation
-from atlas_storage.registry import StorageRegistry
+from atlas_storage import (
+    FileSystemBackend,
+    StorageLocation,
+    StorageManager,
+    StorageRegistry,
+    StorageWriteError,
+    write_csv,
+    write_json,
+    write_parquet,
+)
 
 
 def _sample_dataframe() -> pd.DataFrame:
@@ -35,6 +44,19 @@ def _sample_dataframe() -> pd.DataFrame:
             {"station_id": "STN-03", "temperature_c": 15.2, "city": "Vancouver"},
         ]
     )
+
+
+class _FailingWriteBackend(StorageProvider):
+    """Storage backend that fails on save to verify end-to-end storage failure handling."""
+
+    def save(self, data: Any, path: str) -> None:
+        raise StorageWriteError(f"Physical storage write failure for '{path}'")
+
+    def load(self, path: str) -> bytes:
+        raise NotImplementedError
+
+    def exists(self, path: str) -> bool:
+        return False
 
 
 @pytest.mark.parametrize(
@@ -108,15 +130,54 @@ def test_end_to_end_local_file_ingestion_across_formats(
     assert persisted_path.exists()
     assert "year=" in str(persisted_path)
 
-    if dest_format == "csv":
-        loaded_df = read_csv(str(persisted_path))
-    elif dest_format == "json":
-        loaded_df = read_json(str(persisted_path))
-    else:
-        loaded_df = read_parquet(str(persisted_path))
+    storage_manager = StorageManager(backend=FileSystemBackend())
+    loaded_df = storage_manager.load(
+        StorageLocation(
+            layer=BRONZE,
+            path=str(persisted_path),
+            format=dest_format,
+        )
+    )
 
     assert len(loaded_df) == 3
     assert list(loaded_df["station_id"]) == ["STN-01", "STN-02", "STN-03"]
+
+
+def test_integration_raw_byte_ingestion(tmp_path: Path) -> None:
+    raw_source = tmp_path / "incoming" / "sensor_dump.bin"
+    raw_source.parent.mkdir(parents=True, exist_ok=True)
+    raw_payload = b"\x89ATLAS\r\n\x1a\nbinary-telemetry-payload"
+    raw_source.write_bytes(raw_payload)
+
+    dest_path = tmp_path / "bronze" / "sensor_dump.bin"
+    service = IngestionService()
+
+    request = IngestionRequest(
+        request_id="req-raw-bytes",
+        dataset_id=DatasetId("sensor_telemetry"),
+        source=SourceConfig(
+            source_id="sensor-local",
+            source_name="Raw Sensor Binary",
+            source_type="local_file",
+            config={"path": str(raw_source)},
+        ),
+        destination=StorageLocation(
+            layer=BRONZE,
+            path=str(dest_path),
+            format="raw",
+        ),
+        source_format="raw",
+    )
+
+    result = service.ingest(request, execution_id="exec-raw-1")
+    assert result.success is True
+    assert result.status == ExecutionStatus.SUCCEEDED
+    assert result.row_count == 1
+    assert dest_path.exists()
+
+    storage_manager = StorageManager(backend=FileSystemBackend())
+    loaded_bytes = storage_manager.load(request.destination)
+    assert loaded_bytes == raw_payload
 
 
 def test_integration_missing_source_file_produces_failed_result(tmp_path: Path) -> None:
@@ -156,3 +217,53 @@ def test_integration_missing_source_file_produces_failed_result(tmp_path: Path) 
     tracked = service.get_execution("exec-missing-1")
     assert tracked.status == ExecutionStatus.FAILED
     assert tracked.lifecycle_state == IngestionState.FAILED
+
+
+def test_integration_storage_failure_and_execution_failure_tracking(tmp_path: Path) -> None:
+    df = _sample_dataframe()
+    source_file = tmp_path / "source" / "valid.csv"
+    source_file.parent.mkdir(parents=True, exist_ok=True)
+    write_csv(df, str(source_file))
+
+    dest_file = tmp_path / "bronze" / "failed_write.parquet"
+    service = IngestionService(
+        storage_manager=StorageManager(backend=_FailingWriteBackend()),
+    )
+
+    request = IngestionRequest(
+        request_id="req-storage-fail",
+        dataset_id=DatasetId("weather_observations"),
+        source=SourceConfig(
+            source_id="valid-csv",
+            source_name="Valid CSV Source",
+            source_type="local_file",
+            config={"path": str(source_file)},
+        ),
+        destination=StorageLocation(
+            layer=BRONZE,
+            path=str(dest_file),
+            format="parquet",
+        ),
+        source_format="csv",
+    )
+
+    result = service.ingest(request, execution_id="exec-storage-fail-1")
+
+    assert result.success is False
+    assert result.status == ExecutionStatus.FAILED
+    assert result.lifecycle_state == IngestionState.FAILED
+    assert result.execution_id == "exec-storage-fail-1"
+    assert result.artifacts == []
+    assert result.error_type == "LoadingError"
+    assert "Physical storage write failure" in (result.error_message or "")
+
+    tracked = service.get_execution("exec-storage-fail-1")
+    assert tracked.status == ExecutionStatus.FAILED
+    assert tracked.lifecycle_state == IngestionState.FAILED
+    assert tracked.state_history == [
+        IngestionState.PENDING,
+        IngestionState.EXTRACTING,
+        IngestionState.EXTRACTED,
+        IngestionState.LOADING,
+        IngestionState.FAILED,
+    ]

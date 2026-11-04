@@ -2,23 +2,19 @@
 
 from __future__ import annotations
 
-import io
-import json
 from datetime import datetime
 from pathlib import PurePath
-from typing import Any
 
-import pandas as pd  # type: ignore[import-untyped]
-from atlas_connectors.models.extraction_result import ExtractionResult
-from atlas_core.contracts.storage import StorageProvider
-from atlas_core.identifiers import generate_execution_id
-from atlas_core.models.artifact import Artifact
-from atlas_storage.backends.filesystem import FileSystemBackend
-from atlas_storage.exceptions import StorageError
-from atlas_storage.manager import StorageManager
-from atlas_storage.models.storage_location import StorageLocation
-from atlas_storage.partitioning.strategy import PartitionStrategy
-from atlas_storage.registry import StorageRegistry
+from atlas_connectors import ExtractionResult
+from atlas_core import Artifact, StorageProvider, generate_execution_id
+from atlas_storage import (
+    FileSystemBackend,
+    PartitionStrategy,
+    StorageError,
+    StorageLocation,
+    StorageManager,
+    StorageRegistry,
+)
 
 from atlas_ingestion.exceptions import LoadingError
 from atlas_ingestion.models.ingestion_request import (
@@ -84,12 +80,8 @@ class Loader:
                     request_id=request.request_id,
                 )
 
-            payload_bytes = self._serialize_payload(
-                data=extraction_result.data,
-                target_format=target_location.format,
-            )
             storage_result = self._storage_manager.save(
-                data=payload_bytes,
+                data=extraction_result.data,
                 location=target_location,
             )
         except LoadingError:
@@ -156,49 +148,6 @@ class Loader:
             layer=layer,
             path=target_path,
             format=fmt,
-        )
-
-    @classmethod
-    def _serialize_payload(cls, data: Any, target_format: str) -> bytes:
-        if data is None:
-            raise ValueError("Cannot persist None payload to storage.")
-
-        fmt = target_format.lower()
-        if isinstance(data, (bytes, bytearray)):
-            return bytes(data)
-
-        if fmt in {"raw", "bytes"}:
-            if isinstance(data, str):
-                return data.encode("utf-8")
-            return json.dumps(data).encode("utf-8")
-
-        dataframe = cls._to_dataframe(data)
-
-        if fmt == "csv":
-            csv_text = dataframe.to_csv(index=False)
-            return csv_text.encode("utf-8")
-
-        if fmt == "json":
-            json_text = dataframe.to_json(orient="records")
-            return (json_text or "[]").encode("utf-8")
-
-        if fmt == "parquet":
-            buffer = io.BytesIO()
-            dataframe.to_parquet(buffer, index=False)
-            return buffer.getvalue()
-
-        raise ValueError(f"Unsupported storage serialization format '{target_format}'.")
-
-    @staticmethod
-    def _to_dataframe(data: Any) -> pd.DataFrame:
-        if isinstance(data, pd.DataFrame):
-            return data
-        if isinstance(data, list):
-            return pd.DataFrame(data)
-        if isinstance(data, dict):
-            return pd.DataFrame([data])
-        raise TypeError(
-            f"Cannot convert extracted payload of type '{type(data).__name__}' to DataFrame."
         )
 
 

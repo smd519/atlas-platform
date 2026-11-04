@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-from atlas_connectors.factory import ConnectorFactory
-from atlas_connectors.registry import ConnectorRegistry
-from atlas_core.contracts.storage import StorageProvider
-from atlas_storage.manager import StorageManager
-from atlas_storage.registry import StorageRegistry
+from atlas_connectors import ConnectorFactory, ConnectorRegistry
+from atlas_core import StorageProvider
+from atlas_storage import StorageManager, StorageRegistry
 
 from atlas_ingestion.extraction.extractor import Extractor
 from atlas_ingestion.loading.loader import Loader

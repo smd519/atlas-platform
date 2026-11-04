@@ -7,16 +7,12 @@ from typing import Any
 
 import pandas as pd  # type: ignore[import-untyped]
 import pytest
-from atlas_connectors.models.extraction_result import ExtractionResult
-from atlas_connectors.models.source_config import SourceConfig
-from atlas_core.contracts.storage import StorageProvider
-from atlas_core.types import DatasetId
+from atlas_connectors import ExtractionResult, SourceConfig
+from atlas_core import DatasetId, StorageProvider
 from atlas_ingestion.exceptions import LoadingError
 from atlas_ingestion.loading.loader import Loader
 from atlas_ingestion.models.ingestion_request import ExecutionConfig, IngestionRequest
-from atlas_storage.exceptions import StorageWriteError
-from atlas_storage.manager import StorageManager
-from atlas_storage.models.storage_location import StorageLocation
+from atlas_storage import StorageLocation, StorageManager, StorageWriteError
 
 
 class InMemoryStorageProvider(StorageProvider):

@@ -4,15 +4,17 @@ from __future__ import annotations
 
 from typing import Any
 
-from atlas_connectors.models.source_config import SourceConfig
-from atlas_core.constants import BRONZE
-from atlas_core.identifiers import generate_execution_id
-from atlas_core.models.source import Source
-from atlas_core.types import DatasetId, SourceId
-from atlas_core.validation import require_not_empty
-from atlas_storage.models.storage_location import StorageLocation
+from atlas_connectors import SourceConfig
+from atlas_core import (
+    BRONZE,
+    DatasetId,
+    Source,
+    SourceId,
+    generate_execution_id,
+    require_not_empty,
+)
+from atlas_storage import StorageLocation
 from pydantic import BaseModel, ConfigDict, Field, model_validator
-from pydantic import ValidationError as PydanticValidationError
 
 from atlas_ingestion.exceptions import InvalidIngestionRequestError
 
@@ -60,7 +62,7 @@ class IngestionRequest(BaseModel):
             super().__init__(**data)
         except InvalidIngestionRequestError:
             raise
-        except PydanticValidationError as exc:
+        except Exception as exc:
             raise InvalidIngestionRequestError(
                 f"Invalid ingestion request configuration: {exc}"
             ) from exc

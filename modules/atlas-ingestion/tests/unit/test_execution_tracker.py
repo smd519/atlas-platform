@@ -3,15 +3,13 @@
 from __future__ import annotations
 
 import pytest
-from atlas_connectors.models.source_config import SourceConfig
-from atlas_core.contracts.execution import ExecutionManager
-from atlas_core.enums import ExecutionStatus
-from atlas_core.types import DatasetId
+from atlas_connectors import SourceConfig
+from atlas_core import DatasetId, ExecutionManager, ExecutionStatus
 from atlas_ingestion.exceptions import ExecutionTrackingError
 from atlas_ingestion.lifecycle import IngestionState
 from atlas_ingestion.models.ingestion_request import IngestionRequest
 from atlas_ingestion.tracking.execution_tracker import ExecutionTracker
-from atlas_storage.models.storage_location import StorageLocation
+from atlas_storage import StorageLocation
 
 
 class FakeExecutionManagerDelegate(ExecutionManager):

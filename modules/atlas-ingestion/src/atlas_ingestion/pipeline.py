@@ -5,8 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
-from atlas_core.enums import ExecutionStatus
-from atlas_core.logging import get_logger
+from atlas_core import ExecutionStatus, get_logger
 
 from atlas_ingestion.exceptions import (
     ExecutionTrackingError,

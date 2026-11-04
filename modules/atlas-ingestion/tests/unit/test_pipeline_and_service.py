@@ -5,12 +5,12 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 import pytest
-from atlas_connectors.exceptions import ConnectorConnectionError
-from atlas_connectors.models.extraction_result import ExtractionResult
-from atlas_connectors.models.source_config import SourceConfig
-from atlas_core.enums import ExecutionStatus
-from atlas_core.models.artifact import Artifact
-from atlas_core.types import DatasetId
+from atlas_connectors import (
+    ConnectorConnectionError,
+    ExtractionResult,
+    SourceConfig,
+)
+from atlas_core import Artifact, DatasetId, ExecutionStatus
 from atlas_ingestion.exceptions import (
     ExecutionTrackingError,
     ExtractionError,
@@ -23,8 +23,7 @@ from atlas_ingestion.models.ingestion_request import IngestionRequest
 from atlas_ingestion.pipeline import IngestionPipeline
 from atlas_ingestion.service import IngestionService
 from atlas_ingestion.tracking.execution_tracker import ExecutionTracker
-from atlas_storage.exceptions import StorageWriteError
-from atlas_storage.models.storage_location import StorageLocation
+from atlas_storage import StorageLocation, StorageWriteError
 
 
 class StubExtractor(Extractor):
