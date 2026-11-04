@@ -5,10 +5,15 @@ build-backend = "hatchling.build"
 [project]
 name = "atlas-storage"
 version = "0.1.0"
-description = ""
+description = "Storage abstractions, format serializers, partitioning, and backends for Atlas Platform."
 readme = "README.md"
 requires-python = ">=3.12,<3.14"
-dependencies = []
+dependencies = [
+    "atlas-core",
+    "pandas>=3.1.0",
+    "pyarrow>=26.0.1",
+    "pydantic>=2.14.2",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/atlas_storage"]
