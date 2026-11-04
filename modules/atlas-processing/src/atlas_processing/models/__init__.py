@@ -21,4 +21,3 @@ __all__ = [
     "ProcessingStatistics",
     "SUPPORTED_PROCESSING_FORMATS",
 ]
-

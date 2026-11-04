@@ -9,4 +9,3 @@ __all__ = [
     "parse_json",
     "parse_parquet",
 ]
-

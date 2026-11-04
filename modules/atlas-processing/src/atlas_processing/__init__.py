@@ -102,4 +102,3 @@ __all__ = [
     "create_default_storage_registry",
     "create_default_transformation_registry",
 ]
-

@@ -76,4 +76,3 @@ __all__ = [
     "require_not_empty",
     "settings",
 ]
-

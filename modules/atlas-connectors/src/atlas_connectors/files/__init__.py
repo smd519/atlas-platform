@@ -3,4 +3,3 @@
 from atlas_connectors.files.local import LocalFileConnector
 
 __all__ = ["LocalFileConnector"]
-
