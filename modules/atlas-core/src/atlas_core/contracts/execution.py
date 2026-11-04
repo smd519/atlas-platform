@@ -2,7 +2,6 @@ from abc import ABC, abstractmethod
 
 
 class ExecutionManager(ABC):
-
     @abstractmethod
     def start(self, execution_id: str) -> None:
         pass

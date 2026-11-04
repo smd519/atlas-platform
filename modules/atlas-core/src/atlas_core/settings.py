@@ -2,7 +2,6 @@ from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-
 ENVIRONMENT = (
     Path(".env.environment").read_text().strip()
     if Path(".env.environment").exists()

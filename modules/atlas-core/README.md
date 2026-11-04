@@ -29,17 +29,11 @@ Shared platform primitives used across Atlas modules.
 ## Exceptions
 
 ```python
-raise ConfigurationError(
-    "Missing required source configuration."
-)
+raise ConfigurationError("Missing required source configuration.")
 
-raise ConnectorError(
-    "Failed to retrieve Environment Canada dataset."
-)
+raise ConnectorError("Failed to retrieve Environment Canada dataset.")
 
-raise ValidationError(
-    "Dataset schema does not match expected contract."
-)
+raise ValidationError("Dataset schema does not match expected contract.")
 ```
 
 ## Logging

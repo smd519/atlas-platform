@@ -36,7 +36,7 @@ def configure_logging(level: str = "INFO") -> None:
     )
 
 
-def get_logger(name: str, **context: Any):
+def get_logger(name: str, **context: Any) -> Any:
     """
     Create a structured logger with optional context.
     """
