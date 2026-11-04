@@ -1,3 +1,4 @@
+# modules\atlas-core\src\atlas_core\contracts\storage.py
 from abc import ABC, abstractmethod
 from typing import Any
 
