@@ -1,0 +1,1 @@
+"""Ingestion-specific exception hierarchy."""
