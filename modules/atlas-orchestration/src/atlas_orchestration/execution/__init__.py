@@ -15,11 +15,16 @@ from atlas_orchestration.execution.executors import (
 from atlas_orchestration.execution.registry import StepExecutorRegistry
 from atlas_orchestration.execution.resolver import ContextResolver
 from atlas_orchestration.execution.state import StateManager
+from atlas_orchestration.execution.timeout import (
+    ExecutionDeadline,
+    execute_with_timeout,
+)
 
 __all__ = [
     "BaseStepExecutor",
     "ContextResolver",
     "ExecutionContext",
+    "ExecutionDeadline",
     "IngestionExecutor",
     "MockStepExecutor",
     "ProcessingExecutor",
@@ -27,5 +32,6 @@ __all__ = [
     "StateManager",
     "StepExecutorRegistry",
     "WorkflowEngine",
+    "execute_with_timeout",
     "invoke_step_executor",
 ]

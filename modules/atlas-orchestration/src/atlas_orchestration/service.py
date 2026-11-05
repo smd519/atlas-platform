@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import time
+from collections.abc import Callable
 from typing import Any
 
 from atlas_core import ExecutionStatus
@@ -17,7 +19,8 @@ from atlas_orchestration.execution.executors import (
 )
 from atlas_orchestration.execution.registry import StepExecutorRegistry
 from atlas_orchestration.execution.resolver import ContextResolver
-from atlas_orchestration.models.step_execution import StepExecution
+from atlas_orchestration.models.events import EventSubscriber, ExecutionEventPublisher
+from atlas_orchestration.models.step_execution import StepAttempt, StepExecution
 from atlas_orchestration.models.workflow import WorkflowDefinition
 from atlas_orchestration.models.workflow_execution import WorkflowExecution
 from atlas_orchestration.models.workflow_result import WorkflowResult
@@ -42,6 +45,9 @@ class OrchestrationService:
         dependencies: OrchestrationDependencies | None = None,
         executor_registry: StepExecutorRegistry | None = None,
         resolver: ContextResolver | None = None,
+        event_publisher: ExecutionEventPublisher | None = None,
+        sleep_fn: Callable[[float], None] = time.sleep,
+        monotonic_clock: Callable[[], float] = time.monotonic,
         engine: WorkflowEngine | None = None,
         register_default_executors: bool = True,
     ) -> None:
@@ -52,6 +58,7 @@ class OrchestrationService:
         self._tracker: ExecutionTracker = tracker or InMemoryExecutionTracker()
         self._dependencies = dependencies or OrchestrationDependencies()
         self._resolver = resolver or ContextResolver()
+        self._event_publisher = event_publisher or ExecutionEventPublisher()
 
         if executor_registry is not None:
             self._executor_registry = executor_registry
@@ -66,6 +73,9 @@ class OrchestrationService:
             resolver=self._resolver,
             tracker=self._tracker,
             dependencies=self._dependencies,
+            event_publisher=self._event_publisher,
+            sleep_fn=sleep_fn,
+            monotonic_clock=monotonic_clock,
         )
 
     @staticmethod
@@ -108,6 +118,19 @@ class OrchestrationService:
     def engine(self) -> WorkflowEngine:
         """Return the underlying :class:`WorkflowEngine`."""
         return self._engine
+
+    @property
+    def event_publisher(self) -> ExecutionEventPublisher:
+        """Return the :class:`ExecutionEventPublisher` used by this service."""
+        return self._engine.event_publisher
+
+    def register_event_listener(self, listener: EventSubscriber) -> None:
+        """Register a listener to receive structured execution events."""
+        self._engine.register_event_listener(listener)
+
+    def unregister_event_listener(self, listener: EventSubscriber) -> None:
+        """Remove a previously registered execution event listener."""
+        self._engine.unregister_event_listener(listener)
 
     # ------------------------------------------------------------------
     # Workflow Validation & Registration
@@ -209,6 +232,10 @@ class OrchestrationService:
     def list_step_executions(self, execution_id: str) -> list[StepExecution]:
         """List all tracked :class:`StepExecution` records for ``execution_id``."""
         return self._tracker.list_step_executions(execution_id)
+
+    def list_step_attempts(self, step_execution_id: str) -> list[StepAttempt]:
+        """List all tracked :class:`StepAttempt` records for ``step_execution_id``."""
+        return self._tracker.list_step_attempts(step_execution_id)
 
 
 __all__ = ["OrchestrationService"]

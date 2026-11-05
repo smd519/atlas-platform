@@ -48,6 +48,8 @@ class ProcessingExecutor(BaseStepExecutor):
                 workflow_version=context.workflow_version,
                 execution_id=context.execution_id,
                 step_id=step.step_id,
+                retryable=False,
+                error_code="UNSUPPORTED_ACTION",
             )
 
         service = self._resolve_service(step, context, dependencies)
@@ -104,6 +106,8 @@ class ProcessingExecutor(BaseStepExecutor):
                 workflow_version=context.workflow_version,
                 execution_id=context.execution_id,
                 step_id=step.step_id,
+                retryable=False,
+                error_code="MISSING_DEPENDENCY",
             )
         return service
 
@@ -192,6 +196,8 @@ class ProcessingExecutor(BaseStepExecutor):
                 workflow_version=context.workflow_version,
                 execution_id=context.execution_id,
                 step_id=step.step_id,
+                retryable=False,
+                error_code="INVALID_PARAMETERS",
             ) from exc
 
     @staticmethod

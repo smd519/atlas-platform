@@ -12,7 +12,7 @@ from atlas_orchestration.exceptions import (
     StepExecutionNotFoundError,
     WorkflowExecutionNotFoundError,
 )
-from atlas_orchestration.models.step_execution import StepExecution
+from atlas_orchestration.models.step_execution import StepAttempt, StepExecution
 from atlas_orchestration.models.workflow_execution import WorkflowExecution
 from atlas_orchestration.tracking.execution_tracker import ExecutionTracker
 
@@ -202,6 +202,22 @@ class InMemoryExecutionTracker(ExecutionTracker):
                 )
             step_ids = self._execution_step_ids.get(clean_id, [])
             return [self._step_executions[s_id].model_copy(deep=True) for s_id in step_ids]
+
+    def record_step_attempt(
+        self,
+        step_execution_id: str,
+        attempt: StepAttempt,
+    ) -> StepExecution:
+        """Atomically record or update a :class:`StepAttempt` on ``step_execution_id``."""
+        if not isinstance(attempt, StepAttempt):
+            raise InvalidWorkflowStateError(f"Expected StepAttempt, got {type(attempt).__name__}.")
+        with self._lock:
+            return super().record_step_attempt(step_execution_id, attempt.model_copy(deep=True))
+
+    def list_step_attempts(self, step_execution_id: str) -> list[StepAttempt]:
+        """Return all :class:`StepAttempt` records for ``step_execution_id`` in attempt order."""
+        with self._lock:
+            return [a.model_copy(deep=True) for a in super().list_step_attempts(step_execution_id)]
 
     def start(self, execution_id: str) -> None:
         """Transition ``execution_id`` to ``RUNNING`` status with a start timestamp."""
