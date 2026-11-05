@@ -11,6 +11,7 @@ from atlas_orchestration import (
     ExecutionContext,
     ExecutionTracker,
     InMemoryExecutionTracker,
+    OrchestrationDependencies,
     StateManager,
     StepExecution,
     WorkflowStep,
@@ -20,7 +21,12 @@ from atlas_orchestration import (
 class _DummyStepExecutor(BaseStepExecutor):
     """Concrete test implementation of BaseStepExecutor."""
 
-    def execute(self, step: WorkflowStep, context: ExecutionContext) -> StepExecution:
+    def execute(
+        self,
+        step: WorkflowStep,
+        context: ExecutionContext,
+        dependencies: OrchestrationDependencies | None = None,
+    ) -> StepExecution:
         now = datetime.now(UTC)
         output = {"executed_action": step.action, "target": step.module_target}
         context.set_step_output(step.step_id, output)
