@@ -16,6 +16,7 @@ from atlas_orchestration.exceptions import (
     InvalidWorkflowDependencyError,
     OrchestrationError,
 )
+from atlas_orchestration.models.retry import RetryPolicy
 
 
 def validate_json_compatible(
@@ -74,8 +75,23 @@ class WorkflowStep(BaseModel):
     action: str
     parameters: dict[str, Any] = Field(default_factory=dict)
     depends_on: list[str] = Field(default_factory=list)
+    retry_policy: RetryPolicy | None = None
+    timeout_seconds: float | None = None
 
     def __init__(self, **data: Any) -> None:
+        if "timeout_seconds" in data and data["timeout_seconds"] is not None:
+            raw_timeout = data["timeout_seconds"]
+            if (
+                isinstance(raw_timeout, bool)
+                or not isinstance(raw_timeout, (int, float))
+                or math.isnan(float(raw_timeout))
+                or math.isinf(float(raw_timeout))
+                or float(raw_timeout) <= 0.0
+            ):
+                raise InvalidStepDefinitionError(
+                    f"WorkflowStep timeout_seconds must be a positive finite number, "
+                    f"got {raw_timeout!r}."
+                )
         try:
             super().__init__(**data)
         except (InvalidStepDefinitionError, InvalidWorkflowDependencyError):
@@ -94,6 +110,16 @@ class WorkflowStep(BaseModel):
             require_not_empty(clean_action, "action")
         except ValueError as exc:
             raise InvalidStepDefinitionError(str(exc), step_id=clean_id or None) from exc
+
+        if self.timeout_seconds is not None and (
+            math.isnan(self.timeout_seconds)
+            or math.isinf(self.timeout_seconds)
+            or self.timeout_seconds <= 0.0
+        ):
+            raise InvalidStepDefinitionError(
+                f"Step '{clean_id}' timeout_seconds must be > 0.0, got {self.timeout_seconds}.",
+                step_id=clean_id,
+            )
 
         cleaned_deps: list[str] = []
         seen_deps: set[str] = set()

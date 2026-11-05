@@ -72,6 +72,57 @@ class CyclicDependencyError(InvalidWorkflowDependencyError):
 class StepExecutionError(OrchestrationError):
     """Raised when a workflow step execution or step state transition fails."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        retryable: bool = True,
+        error_code: str | None = None,
+        workflow_id: str | None = None,
+        workflow_version: int | None = None,
+        execution_id: str | None = None,
+        step_id: str | None = None,
+        step_execution_id: str | None = None,
+    ) -> None:
+        super().__init__(
+            message,
+            workflow_id=workflow_id,
+            workflow_version=workflow_version,
+            execution_id=execution_id,
+            step_id=step_id,
+            step_execution_id=step_execution_id,
+        )
+        self.retryable = retryable
+        self.error_code = error_code
+
+
+class StepTimeoutError(StepExecutionError):
+    """Raised when a workflow step exceeds its configured execution timeout."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        timeout_seconds: float | None = None,
+        retryable: bool = True,
+        workflow_id: str | None = None,
+        workflow_version: int | None = None,
+        execution_id: str | None = None,
+        step_id: str | None = None,
+        step_execution_id: str | None = None,
+    ) -> None:
+        super().__init__(
+            message,
+            retryable=retryable,
+            error_code="StepTimeoutError",
+            workflow_id=workflow_id,
+            workflow_version=workflow_version,
+            execution_id=execution_id,
+            step_id=step_id,
+            step_execution_id=step_execution_id,
+        )
+        self.timeout_seconds = timeout_seconds
+
 
 class InvalidWorkflowStateError(OrchestrationError):
     """Raised when a workflow or step execution record violates state or invariant constraints."""
@@ -148,6 +199,10 @@ class DuplicateExecutorRegistrationError(OrchestrationError):
         self.module_target = module_target
 
 
+class PersistenceError(OrchestrationError):
+    """Raised when persisting or deserializing execution state fails."""
+
+
 __all__ = [
     "CyclicDependencyError",
     "DuplicateExecutorRegistrationError",
@@ -158,8 +213,10 @@ __all__ = [
     "InvalidWorkflowDependencyError",
     "InvalidWorkflowStateError",
     "OrchestrationError",
+    "PersistenceError",
     "StepExecutionError",
     "StepExecutionNotFoundError",
+    "StepTimeoutError",
     "UnknownModuleTargetError",
     "UnresolvedContextReferenceError",
     "WorkflowExecutionNotFoundError",
