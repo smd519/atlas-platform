@@ -81,6 +81,14 @@ class WorkflowExecution(Execution):
                 execution_id=clean_exec_id,
             )
 
+        if self.status == ExecutionStatus.CANCELLED:
+            raise InvalidWorkflowStateError(
+                "WorkflowExecution status cannot be CANCELLED; valid workflow states are "
+                "PENDING, RUNNING, SUCCEEDED, and FAILED.",
+                workflow_id=clean_wf_id,
+                execution_id=clean_exec_id,
+            )
+
         start = ensure_timezone_aware(
             self.start_time,
             field_name="start_time",

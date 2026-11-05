@@ -19,4 +19,3 @@ __all__ = [
     "ensure_timezone_aware",
     "validate_json_compatible",
 ]
-
