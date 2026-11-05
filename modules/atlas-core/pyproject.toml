@@ -1,0 +1,18 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "atlas-core"
+version = "0.1.0"
+description = "Shared domain models, contracts, exceptions, configuration, and logging for Atlas Platform."
+readme = "README.md"
+requires-python = ">=3.12,<3.14"
+dependencies = [
+    "pydantic>=2.14.2",
+    "pydantic-settings>=2.16.2",
+    "structlog>=26.1.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/atlas_core"]
