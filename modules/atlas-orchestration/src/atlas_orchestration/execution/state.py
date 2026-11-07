@@ -6,7 +6,7 @@ from abc import ABC, abstractmethod
 
 from atlas_core import ExecutionManager, ExecutionStatus
 
-from atlas_orchestration.models.step_execution import StepExecution
+from atlas_orchestration.models.step_execution import StepAttempt, StepExecution
 from atlas_orchestration.models.workflow_execution import WorkflowExecution
 
 
@@ -52,6 +52,39 @@ class StateManager(ExecutionManager, ABC):
     @abstractmethod
     def list_step_executions(self, execution_id: str) -> list[StepExecution]:
         """List all step executions associated with ``execution_id``."""
+
+    def record_step_attempt(
+        self,
+        step_execution_id: str,
+        attempt: StepAttempt,
+    ) -> StepExecution:
+        """Record or update a :class:`StepAttempt` on ``step_execution_id``."""
+        step = self.get_step_execution(step_execution_id)
+        updated_attempts = [a for a in step.attempts if a.attempt_number != attempt.attempt_number]
+        updated_attempts.append(attempt)
+        updated_attempts.sort(key=lambda a: a.attempt_number)
+        updated_step = StepExecution(
+            step_execution_id=step.step_execution_id,
+            execution_id=step.execution_id,
+            step_id=step.step_id,
+            module_target=step.module_target,
+            status=step.status,
+            attempt_number=max(step.attempt_number, attempt.attempt_number),
+            start_time=step.start_time or attempt.start_time,
+            end_time=step.end_time,
+            duration_seconds=step.duration_seconds,
+            module_execution_ref=step.module_execution_ref,
+            error_code=step.error_code,
+            error_message=step.error_message,
+            output_references=step.output_references,
+            attempts=updated_attempts,
+        )
+        return self.update_step_execution(updated_step)
+
+    def list_step_attempts(self, step_execution_id: str) -> list[StepAttempt]:
+        """Return all :class:`StepAttempt` records for ``step_execution_id``."""
+        step = self.get_step_execution(step_execution_id)
+        return list(step.attempts)
 
     @abstractmethod
     def start(self, execution_id: str) -> None:

@@ -72,6 +72,57 @@ class CyclicDependencyError(InvalidWorkflowDependencyError):
 class StepExecutionError(OrchestrationError):
     """Raised when a workflow step execution or step state transition fails."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        retryable: bool = True,
+        error_code: str | None = None,
+        workflow_id: str | None = None,
+        workflow_version: int | None = None,
+        execution_id: str | None = None,
+        step_id: str | None = None,
+        step_execution_id: str | None = None,
+    ) -> None:
+        super().__init__(
+            message,
+            workflow_id=workflow_id,
+            workflow_version=workflow_version,
+            execution_id=execution_id,
+            step_id=step_id,
+            step_execution_id=step_execution_id,
+        )
+        self.retryable = retryable
+        self.error_code = error_code
+
+
+class StepTimeoutError(StepExecutionError):
+    """Raised when a workflow step exceeds its configured execution timeout."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        timeout_seconds: float | None = None,
+        retryable: bool = True,
+        workflow_id: str | None = None,
+        workflow_version: int | None = None,
+        execution_id: str | None = None,
+        step_id: str | None = None,
+        step_execution_id: str | None = None,
+    ) -> None:
+        super().__init__(
+            message,
+            retryable=retryable,
+            error_code="StepTimeoutError",
+            workflow_id=workflow_id,
+            workflow_version=workflow_version,
+            execution_id=execution_id,
+            step_id=step_id,
+            step_execution_id=step_execution_id,
+        )
+        self.timeout_seconds = timeout_seconds
+
 
 class InvalidWorkflowStateError(OrchestrationError):
     """Raised when a workflow or step execution record violates state or invariant constraints."""
@@ -89,8 +140,72 @@ class ExecutionContextError(OrchestrationError):
     """Raised when an execution context lookup or value validation fails."""
 
 
+class UnresolvedContextReferenceError(ExecutionContextError):
+    """Raised when a dynamic context reference (${...}) cannot be parsed or resolved."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        reference: str | None = None,
+        workflow_id: str | None = None,
+        workflow_version: int | None = None,
+        execution_id: str | None = None,
+        step_id: str | None = None,
+    ) -> None:
+        super().__init__(
+            message,
+            workflow_id=workflow_id,
+            workflow_version=workflow_version,
+            execution_id=execution_id,
+            step_id=step_id,
+        )
+        self.reference = reference
+
+
+class UnknownModuleTargetError(OrchestrationError):
+    """Raised when no step executor is registered for a step's module_target."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        module_target: str | None = None,
+        workflow_id: str | None = None,
+        workflow_version: int | None = None,
+        execution_id: str | None = None,
+        step_id: str | None = None,
+    ) -> None:
+        super().__init__(
+            message,
+            workflow_id=workflow_id,
+            workflow_version=workflow_version,
+            execution_id=execution_id,
+            step_id=step_id,
+        )
+        self.module_target = module_target
+
+
+class DuplicateExecutorRegistrationError(OrchestrationError):
+    """Raised when attempting to register an executor for an already-registered module_target."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        module_target: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.module_target = module_target
+
+
+class PersistenceError(OrchestrationError):
+    """Raised when persisting or deserializing execution state fails."""
+
+
 __all__ = [
     "CyclicDependencyError",
+    "DuplicateExecutorRegistrationError",
     "DuplicateWorkflowError",
     "ExecutionContextError",
     "InvalidStepDefinitionError",
@@ -98,8 +213,12 @@ __all__ = [
     "InvalidWorkflowDependencyError",
     "InvalidWorkflowStateError",
     "OrchestrationError",
+    "PersistenceError",
     "StepExecutionError",
     "StepExecutionNotFoundError",
+    "StepTimeoutError",
+    "UnknownModuleTargetError",
+    "UnresolvedContextReferenceError",
     "WorkflowExecutionNotFoundError",
     "WorkflowNotFoundError",
     "WorkflowVersionConflictError",

@@ -1,4 +1,4 @@
-"""StepExecution runtime state model."""
+"""StepExecution and StepAttempt runtime state models."""
 
 from __future__ import annotations
 
@@ -20,8 +20,68 @@ from atlas_orchestration.models.workflow_step import (
 )
 
 
+class StepAttempt(BaseModel):
+    """Immutable record of a single execution attempt for a workflow step."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    attempt_number: int
+    status: ExecutionStatus
+    start_time: datetime
+    end_time: datetime | None = None
+    duration_seconds: float | None = None
+    error_code: str | None = None
+    error_message: str | None = None
+    timed_out: bool = False
+
+    def __init__(self, **data: Any) -> None:
+        try:
+            super().__init__(**data)
+        except InvalidWorkflowStateError:
+            raise
+        except Exception as exc:
+            raise InvalidWorkflowStateError(f"Invalid step attempt record: {exc}") from exc
+
+    @model_validator(mode="after")
+    def _validate_attempt(self) -> StepAttempt:
+        if isinstance(self.attempt_number, bool) or self.attempt_number < 1:
+            raise InvalidWorkflowStateError(
+                f"StepAttempt attempt_number must be >= 1, got {self.attempt_number!r}."
+            )
+        start = ensure_timezone_aware(
+            self.start_time,
+            field_name="start_time",
+            error_cls=InvalidWorkflowStateError,
+        )
+        assert start is not None
+        end = ensure_timezone_aware(
+            self.end_time,
+            field_name="end_time",
+            error_cls=InvalidWorkflowStateError,
+        )
+        if end is not None and end < start:
+            raise InvalidWorkflowStateError(
+                f"StepAttempt end_time ({end.isoformat()}) cannot precede "
+                f"start_time ({start.isoformat()})."
+            )
+
+        computed_duration = self.duration_seconds
+        if computed_duration is not None:
+            if isinstance(computed_duration, bool) or computed_duration < 0.0:
+                raise InvalidWorkflowStateError(
+                    f"StepAttempt duration_seconds must be >= 0.0, got {computed_duration!r}."
+                )
+        elif end is not None:
+            computed_duration = max(0.0, (end - start).total_seconds())
+
+        object.__setattr__(self, "start_time", start)
+        object.__setattr__(self, "end_time", end)
+        object.__setattr__(self, "duration_seconds", computed_duration)
+        return self
+
+
 class StepExecution(BaseModel):
-    """Represents the execution state and outcome of an individual workflow step."""
+    """Represents the execution state, attempt history, and outcome of a workflow step."""
 
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
 
@@ -33,10 +93,12 @@ class StepExecution(BaseModel):
     attempt_number: int = 1
     start_time: datetime | None = None
     end_time: datetime | None = None
+    duration_seconds: float | None = None
     module_execution_ref: str | None = None
     error_code: str | None = None
     error_message: str | None = None
     output_references: dict[str, Any] = Field(default_factory=dict)
+    attempts: list[StepAttempt] = Field(default_factory=list)
 
     def __init__(self, **data: Any) -> None:
         try:
@@ -95,6 +157,18 @@ class StepExecution(BaseModel):
                 step_execution_id=clean_step_exec_id,
             )
 
+        computed_duration = self.duration_seconds
+        if computed_duration is not None:
+            if isinstance(computed_duration, bool) or computed_duration < 0.0:
+                raise InvalidWorkflowStateError(
+                    f"StepExecution duration_seconds must be >= 0.0, got {computed_duration!r}.",
+                    execution_id=clean_exec_id,
+                    step_id=clean_step_id,
+                    step_execution_id=clean_step_exec_id,
+                )
+        elif start is not None and end is not None:
+            computed_duration = max(0.0, (end - start).total_seconds())
+
         if self.module_execution_ref is not None:
             clean_ref = self.module_execution_ref.strip()
             if not clean_ref:
@@ -119,14 +193,34 @@ class StepExecution(BaseModel):
                 step_execution_id=clean_step_exec_id,
             ) from exc
 
+        seen_attempt_nums: set[int] = set()
+        for attempt in self.attempts:
+            if attempt.attempt_number in seen_attempt_nums:
+                raise InvalidWorkflowStateError(
+                    f"Duplicate attempt_number {attempt.attempt_number} in StepExecution attempts.",
+                    execution_id=clean_exec_id,
+                    step_id=clean_step_id,
+                    step_execution_id=clean_step_exec_id,
+                )
+            seen_attempt_nums.add(attempt.attempt_number)
+
         object.__setattr__(self, "step_execution_id", clean_step_exec_id)
         object.__setattr__(self, "execution_id", clean_exec_id)
         object.__setattr__(self, "step_id", clean_step_id)
         object.__setattr__(self, "module_target", clean_target)
         object.__setattr__(self, "start_time", start)
         object.__setattr__(self, "end_time", end)
+        object.__setattr__(self, "duration_seconds", computed_duration)
         object.__setattr__(self, "output_references", copy.deepcopy(validated_outputs))
+        object.__setattr__(
+            self,
+            "attempts",
+            [a.model_copy(deep=True) for a in self.attempts],
+        )
         return self
 
 
-__all__ = ["StepExecution"]
+__all__ = [
+    "StepAttempt",
+    "StepExecution",
+]
