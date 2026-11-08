@@ -18,6 +18,7 @@ members = [
     "atlas-platform",
     "atlas-processing",
     "atlas-quality",
+    "atlas-runner",
     "atlas-scheduler",
     "atlas-spatial",
     "atlas-storage",
@@ -112,26 +113,88 @@ source = { editable = "services/atlas-api" }
 name = "atlas-connectors"
 version = "0.1.0"
 source = { editable = "modules/atlas-connectors" }
+dependencies = [
+    { name = "atlas-core" },
+    { name = "httpx" },
+    { name = "pandas" },
+    { name = "pyarrow" },
+    { name = "pydantic" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "atlas-core", editable = "modules/atlas-core" },
+    { name = "httpx", specifier = ">=0.28.1" },
+    { name = "pandas", specifier = ">=3.1.0" },
+    { name = "pyarrow", specifier = ">=26.0.1" },
+    { name = "pydantic", specifier = ">=2.14.2" },
+]
 
 [[package]]
 name = "atlas-core"
 version = "0.1.0"
 source = { editable = "modules/atlas-core" }
+dependencies = [
+    { name = "pydantic" },
+    { name = "pydantic-settings" },
+    { name = "structlog" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "pydantic", specifier = ">=2.14.2" },
+    { name = "pydantic-settings", specifier = ">=2.16.2" },
+    { name = "structlog", specifier = ">=26.1.0" },
+]
 
 [[package]]
 name = "atlas-ingestion"
 version = "0.1.0"
 source = { editable = "modules/atlas-ingestion" }
+dependencies = [
+    { name = "atlas-connectors" },
+    { name = "atlas-core" },
+    { name = "atlas-storage" },
+    { name = "pydantic" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "atlas-connectors", editable = "modules/atlas-connectors" },
+    { name = "atlas-core", editable = "modules/atlas-core" },
+    { name = "atlas-storage", editable = "modules/atlas-storage" },
+    { name = "pydantic", specifier = ">=2.14.2" },
+]
 
 [[package]]
 name = "atlas-metadata"
 version = "0.1.0"
 source = { editable = "modules/atlas-metadata" }
+dependencies = [
+    { name = "atlas-core" },
+    { name = "pydantic" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "atlas-core", editable = "modules/atlas-core" },
+    { name = "pydantic", specifier = ">=2.14.2" },
+]
 
 [[package]]
 name = "atlas-orchestration"
 version = "0.1.0"
 source = { editable = "modules/atlas-orchestration" }
+dependencies = [
+    { name = "atlas-core" },
+    { name = "pydantic" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "atlas-core", editable = "modules/atlas-core" },
+    { name = "pydantic", specifier = ">=2.14.2" },
+]
 
 [[package]]
 name = "atlas-platform"
@@ -139,6 +202,7 @@ version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
     { name = "alembic" },
+    { name = "atlas-runner" },
     { name = "delta-spark" },
     { name = "duckdb" },
     { name = "httpx" },
@@ -165,6 +229,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "alembic", specifier = ">=1.20.1" },
+    { name = "atlas-runner", editable = "services/atlas-runner" },
     { name = "delta-spark", specifier = ">=4.1.0" },
     { name = "duckdb", specifier = ">=2.0.0" },
     { name = "httpx", specifier = ">=0.28.1" },
@@ -192,11 +257,68 @@ dev = [
 name = "atlas-processing"
 version = "0.1.0"
 source = { editable = "modules/atlas-processing" }
+dependencies = [
+    { name = "atlas-core" },
+    { name = "atlas-storage" },
+    { name = "pandas" },
+    { name = "pydantic" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "atlas-core", editable = "modules/atlas-core" },
+    { name = "atlas-storage", editable = "modules/atlas-storage" },
+    { name = "pandas", specifier = ">=3.1.0" },
+    { name = "pydantic", specifier = ">=2.14.2" },
+]
 
 [[package]]
 name = "atlas-quality"
 version = "0.1.0"
 source = { editable = "modules/atlas-quality" }
+dependencies = [
+    { name = "atlas-core" },
+    { name = "atlas-storage" },
+    { name = "pandas" },
+    { name = "pydantic" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "atlas-core", editable = "modules/atlas-core" },
+    { name = "atlas-storage", editable = "modules/atlas-storage" },
+    { name = "pandas", specifier = ">=3.1.0" },
+    { name = "pydantic", specifier = ">=2.14.2" },
+]
+
+[[package]]
+name = "atlas-runner"
+version = "0.1.0"
+source = { editable = "services/atlas-runner" }
+dependencies = [
+    { name = "atlas-connectors" },
+    { name = "atlas-core" },
+    { name = "atlas-ingestion" },
+    { name = "atlas-orchestration" },
+    { name = "atlas-processing" },
+    { name = "atlas-quality" },
+    { name = "atlas-storage" },
+    { name = "pydantic" },
+    { name = "pyyaml" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "atlas-connectors", editable = "modules/atlas-connectors" },
+    { name = "atlas-core", editable = "modules/atlas-core" },
+    { name = "atlas-ingestion", editable = "modules/atlas-ingestion" },
+    { name = "atlas-orchestration", editable = "modules/atlas-orchestration" },
+    { name = "atlas-processing", editable = "modules/atlas-processing" },
+    { name = "atlas-quality", editable = "modules/atlas-quality" },
+    { name = "atlas-storage", editable = "modules/atlas-storage" },
+    { name = "pydantic", specifier = ">=2.14.2" },
+    { name = "pyyaml", specifier = ">=6.0.3" },
+]
 
 [[package]]
 name = "atlas-scheduler"
@@ -212,6 +334,20 @@ source = { editable = "modules/atlas-spatial" }
 name = "atlas-storage"
 version = "0.1.0"
 source = { editable = "modules/atlas-storage" }
+dependencies = [
+    { name = "atlas-core" },
+    { name = "pandas" },
+    { name = "pyarrow" },
+    { name = "pydantic" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "atlas-core", editable = "modules/atlas-core" },
+    { name = "pandas", specifier = ">=3.1.0" },
+    { name = "pyarrow", specifier = ">=26.0.1" },
+    { name = "pydantic", specifier = ">=2.14.2" },
+]
 
 [[package]]
 name = "certifi"
