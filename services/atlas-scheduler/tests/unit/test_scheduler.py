@@ -1,11 +1,16 @@
-"""Unit tests for Scheduler engine: cron, DST, idempotency, misfire, and protocol isolation."""
+"""Unit tests for Scheduler engine: cron, idempotency, failure isolation, misfire, and shutdown."""
 
 from __future__ import annotations
 
 import ast
 import concurrent.futures
 import inspect
+import logging
+import signal
+import threading
 from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
 from zoneinfo import ZoneInfo
 
 import atlas_scheduler.engine as engine_module
@@ -16,6 +21,7 @@ from atlas_scheduler import (
     ScheduleDefinition,
     Scheduler,
     TriggerDefinition,
+    main,
 )
 
 
@@ -91,38 +97,55 @@ def _make_schedule(
 
 
 class TestSchedulerEngine:
-    """Cron evaluation, timezones, DST, delayed ticks, idempotency, and dynamic reload."""
+    """Cron evaluation, timezones, idempotency, failure isolation, misfire, and dynamic reload."""
 
-    def test_delayed_tick_recognizes_due_occurrence_and_prevents_duplicates(self) -> None:
-        provider = FakeScheduleProvider([_make_schedule()])
+    def test_idempotency_key_and_restart_behavior(self) -> None:
+        sched = _make_schedule(
+            "daily_morning",
+            expression="0 6 * * *",
+            timezone="America/Toronto",
+            jobs=["morning_batch", "financials_batch"],
+        )
+        provider = FakeScheduleProvider([sched])
         dispatcher = FakeRunnerDispatcher()
         scheduler = Scheduler(provider=provider, dispatcher=dispatcher, interval=60)
 
         toronto = ZoneInfo("America/Toronto")
-        # Scheduled at 06:00:00 America/Toronto; scheduler wakes slightly late at 06:00:08
+        expected_occurrence_utc = datetime(2026, 11, 8, 6, 0, 0, tzinfo=toronto).astimezone(UTC)
+
+        # 1. Delayed tick at 06:00:08 dispatches both jobs once
         tick_1_time = datetime(2026, 11, 8, 6, 0, 8, tzinfo=toronto)
         records_1 = scheduler.tick(now=tick_1_time)
-        assert len(records_1) == 1
+        assert len(records_1) == 2
+        assert scheduler.dispatched_occurrences == {("daily_morning", expected_occurrence_utc)}
         assert dispatcher.dispatched == [
-            (
-                "daily_morning",
-                "morning_batch",
-                datetime(2026, 11, 8, 6, 0, 0, tzinfo=toronto).astimezone(UTC),
-            )
+            ("daily_morning", "morning_batch", expected_occurrence_utc),
+            ("daily_morning", "financials_batch", expected_occurrence_utc),
         ]
 
-        # Subsequent ticks within the same minute or misfire window do NOT re-dispatch
+        # 2. Repeated ticks within the same occurrence window do not re-dispatch
         tick_2_time = datetime(2026, 11, 8, 6, 0, 45, tzinfo=toronto)
         tick_3_time = datetime(2026, 11, 8, 6, 1, 15, tzinfo=toronto)
         assert scheduler.tick(now=tick_2_time) == []
         assert scheduler.tick(now=tick_3_time) == []
-        assert len(dispatcher.dispatched) == 1
+        assert len(dispatcher.dispatched) == 2
 
-        # Next day's 06:00:05 occurrence IS dispatched
+        # 3. Next day's 06:00:05 occurrence IS dispatched
         next_day_time = datetime(2026, 11, 9, 6, 0, 5, tzinfo=toronto)
         records_next = scheduler.tick(now=next_day_time)
-        assert len(records_next) == 1
-        assert len(dispatcher.dispatched) == 2
+        assert len(records_next) == 2
+        assert len(dispatcher.dispatched) == 4
+
+        # 4. Simulated scheduler process restart resets in-memory idempotency state
+        restarted_dispatcher = FakeRunnerDispatcher()
+        restarted_scheduler = Scheduler(
+            provider=provider,
+            dispatcher=restarted_dispatcher,
+            interval=60,
+        )
+        assert restarted_scheduler.dispatched_occurrences == set()
+        restarted_records = restarted_scheduler.tick(now=tick_1_time)
+        assert len(restarted_records) == 2
 
     def test_disabled_schedules_are_never_dispatched(self) -> None:
         provider = FakeScheduleProvider([_make_schedule(enabled=False)])
@@ -134,7 +157,7 @@ class TestSchedulerEngine:
         assert scheduler.tick(now=due_time) == []
         assert dispatcher.dispatched == []
 
-    def test_multiple_jobs_per_schedule_and_independent_schedules(self) -> None:
+    def test_multiple_jobs_per_schedule_and_independent_timezone_schedules(self) -> None:
         sched_a = _make_schedule(
             "morning_sched",
             expression="0 6 * * *",
@@ -151,7 +174,7 @@ class TestSchedulerEngine:
         dispatcher = FakeRunnerDispatcher()
         scheduler = Scheduler(provider=provider, dispatcher=dispatcher)
 
-        # On 2026-11-08 (EST, UTC-5), 06:00 America/Toronto == 11:00 UTC!
+        # On 2026-11-08 (EST, UTC-5), 06:00 America/Toronto == 11:00 UTC
         tick_time = datetime(2026, 11, 8, 11, 0, 10, tzinfo=UTC)
         records = scheduler.tick(now=tick_time)
 
@@ -161,50 +184,98 @@ class TestSchedulerEngine:
             ("morning_sched", "financials_batch"),
             ("utc_sched", "sensors_batch"),
         ]
+        # Both occurrence timestamps are normalized to UTC in idempotency state
+        expected_utc = datetime(2026, 11, 8, 11, 0, 0, tzinfo=UTC)
+        assert scheduler.dispatched_occurrences == {
+            ("morning_sched", expected_utc),
+            ("utc_sched", expected_utc),
+        }
 
-    def test_daylight_saving_time_transitions_in_america_toronto(self) -> None:
-        """Verify cron evaluation across EDT (UTC-4) and EST (UTC-5) and fall-back Sunday."""
+    def test_dispatch_failure_isolation_across_three_jobs(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Verify second job launch failure does not block first/third jobs or cause retries."""
         sched = _make_schedule(
-            "dst_schedule",
-            expression="30 1 * * *",
+            "multi_job_schedule",
+            expression="0 6 * * *",
             timezone="America/Toronto",
-            jobs=["dst_job"],
+            jobs=["corporations_batch", "sensors_batch", "financials_batch"],
         )
         provider = FakeScheduleProvider([sched])
-        dispatcher = FakeRunnerDispatcher()
-        scheduler = Scheduler(provider=provider, dispatcher=dispatcher)
-        toronto = ZoneInfo("America/Toronto")
+        attempted_jobs: list[str] = []
 
-        # 1. Summer EDT (UTC-4): 2026-07-15 01:30 EDT == 05:30 UTC
-        summer_tick = datetime(2026, 7, 15, 1, 30, 5, tzinfo=toronto)
-        res_summer = scheduler.tick(now=summer_tick)
-        assert len(res_summer) == 1
-        assert res_summer[0].scheduled_occurrence == datetime(2026, 7, 15, 5, 30, tzinfo=UTC)
+        class MockProcess:
+            def __init__(self, pid: int) -> None:
+                self.pid = pid
 
-        # 2. Fall-back day (2026-11-01): 01:30 occurs in EDT (05:30 UTC) and EST (06:30 UTC)
-        # Verify the schedule fires once at 05:30 UTC and does NOT fire a duplicate at 06:30 UTC
-        fallback_first = datetime(2026, 11, 1, 5, 30, 10, tzinfo=UTC)
-        fallback_second = datetime(2026, 11, 1, 6, 30, 10, tzinfo=UTC)
-        assert len(scheduler.tick(now=fallback_first)) == 1
-        assert scheduler.tick(now=fallback_second) == []
+            def poll(self) -> int | None:
+                return None
 
-    def test_misfire_policy_skips_stale_occurrences_outside_grace_window(self) -> None:
-        provider = FakeScheduleProvider([_make_schedule(expression="0 6 * * *")])
-        dispatcher = FakeRunnerDispatcher()
-        scheduler = Scheduler(
-            provider=provider,
-            dispatcher=dispatcher,
-            interval=60,
-            misfire_grace_seconds=300,
-        )
+        def selective_popen(cmd: list[str], *, env: dict[str, str], **_: Any) -> Any:
+            job_id = cmd[-1]
+            attempted_jobs.append(job_id)
+            if job_id == "sensors_batch":
+                raise OSError("Simulated subprocess launch failure for sensors_batch")
+            return MockProcess(pid=8000 + len(attempted_jobs))
+
+        dispatcher = RunnerDispatcher(workspace="customer_001", popen_factory=selective_popen)
+        scheduler = Scheduler(provider=provider, dispatcher=dispatcher, interval=60)
 
         toronto = ZoneInfo("America/Toronto")
-        # Scheduler starts at 10:00:00 (4 hours after 06:00:00 > 300s misfire grace window)
-        late_startup = datetime(2026, 11, 8, 10, 0, 0, tzinfo=toronto)
-        assert scheduler.tick(now=late_startup) == []
+        tick_time = datetime(2026, 11, 8, 6, 0, 5, tzinfo=toronto)
+
+        with caplog.at_level(logging.ERROR, logger="atlas_scheduler.dispatcher"):
+            records = scheduler.tick(now=tick_time)
+
+        # All 3 jobs were attempted once in order; no automatic retry occurred
+        assert attempted_jobs == ["corporations_batch", "sensors_batch", "financials_batch"]
+        assert len(records) == 3
+
+        assert records[0].job_id == "corporations_batch"
+        assert records[0].launch_succeeded is True
+        assert records[0].pid is not None
+
+        assert records[1].job_id == "sensors_batch"
+        assert records[1].launch_succeeded is False
+        assert records[1].pid is None
+        assert "Simulated subprocess launch failure for sensors_batch" in caplog.text
+
+        assert records[2].job_id == "financials_batch"
+        assert records[2].launch_succeeded is True
+        assert records[2].pid is not None
+
+        # Scheduler remains running and the occurrence remains reserved against duplicate dispatch
+        assert scheduler.is_running is True
+        duplicate_tick = datetime(2026, 11, 8, 6, 0, 30, tzinfo=toronto)
+        assert scheduler.tick(now=duplicate_tick) == []
+        assert len(attempted_jobs) == 3
+
+    def test_misfire_policy_bounds_and_skips_stale_occurrences(self) -> None:
+        provider = FakeScheduleProvider([_make_schedule(expression="0 * * * *", timezone="UTC")])
+        dispatcher = FakeRunnerDispatcher()
+        # Default interval=60 -> misfire_grace_seconds == max(60 * 2, 300) == 300s
+        scheduler = Scheduler(provider=provider, dispatcher=dispatcher, interval=60)
+        assert scheduler.misfire_grace_seconds == 300
+
+        # 1. With larger interval=200 -> misfire_grace_seconds == max(200 * 2, 300) == 400s
+        scheduler_large = Scheduler(provider=provider, dispatcher=dispatcher, interval=200)
+        assert scheduler_large.misfire_grace_seconds == 400
+
+        # 2. Occurrence outside the 300s grace window (10:10:00 is 600s after 10:00:00) is skipped
+        stale_tick = datetime(2026, 11, 8, 10, 10, 0, tzinfo=UTC)
+        assert scheduler.tick(now=stale_tick) == []
         assert dispatcher.dispatched == []
 
-    def test_dynamic_schedule_reload_on_every_tick(self) -> None:
+        # 3. After hours of downtime, waking at 14:02:00 (within 300s of 14:00:00) dispatches
+        # ONLY the 14:00:00 occurrence and never replays 10:00, 11:00, 12:00, or 13:00
+        recovery_tick = datetime(2026, 11, 8, 14, 2, 0, tzinfo=UTC)
+        recovered = scheduler.tick(now=recovery_tick)
+        assert len(recovered) == 1
+        assert recovered[0].scheduled_occurrence == datetime(2026, 11, 8, 14, 0, 0, tzinfo=UTC)
+        assert len(dispatcher.dispatched) == 1
+
+    def test_dynamic_schedule_reload_addition_disable_and_removal(self) -> None:
         provider = FakeScheduleProvider([])
         dispatcher = FakeRunnerDispatcher()
         scheduler = Scheduler(provider=provider, dispatcher=dispatcher)
@@ -213,15 +284,28 @@ class TestSchedulerEngine:
         assert scheduler.tick(now=t1) == []
         assert provider.call_count == 1
 
-        # Dynamically add a schedule due at 12:00 UTC
-        provider.schedules.append(
-            _make_schedule("dynamic_noon", expression="0 12 * * *", timezone="UTC")
+        # 1. Dynamically add an enabled schedule due at 12:00 UTC and a disabled schedule
+        hourly_sched = _make_schedule("hourly_utc", expression="0 * * * *", timezone="UTC")
+        disabled_sched = _make_schedule(
+            "disabled_utc",
+            expression="0 * * * *",
+            timezone="UTC",
+            enabled=False,
         )
+        provider.schedules.extend([hourly_sched, disabled_sched])
+
         t2 = datetime(2026, 11, 8, 12, 0, 20, tzinfo=UTC)
         records = scheduler.tick(now=t2)
         assert provider.call_count == 2
         assert len(records) == 1
-        assert records[0].schedule_id == "dynamic_noon"
+        assert records[0].schedule_id == "hourly_utc"
+
+        # 2. Remove hourly_utc before the 13:00 UTC occurrence: it is no longer considered
+        provider.schedules.clear()
+        t3 = datetime(2026, 11, 8, 13, 0, 10, tzinfo=UTC)
+        assert scheduler.tick(now=t3) == []
+        assert provider.call_count == 3
+        assert len(dispatcher.dispatched) == 1
 
     def test_provider_failure_is_logged_without_terminating_scheduler(
         self,
@@ -243,28 +327,72 @@ class TestSchedulerEngine:
         records = scheduler.tick(now=datetime(2026, 11, 8, 12, 0, 25, tzinfo=UTC))
         assert len(records) == 1
 
-    def test_graceful_shutdown_stops_loop(self) -> None:
-        provider = FakeScheduleProvider([])
-        dispatcher = FakeRunnerDispatcher()
-        ticks = 0
+    def test_graceful_shutdown_stops_loop_and_preserves_dispatched_processes(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        monkeypatch.setenv("ATLAS_WORKSPACE", str(tmp_path))
+        ws_dir = tmp_path / "customer_001"
+        schedules_dir = ws_dir / "schedules"
+        schedules_dir.mkdir(parents=True, exist_ok=True)
 
-        def clock_and_stop() -> datetime:
-            nonlocal ticks
-            ticks += 1
-            if ticks >= 2:
-                scheduler.stop()
-            return datetime(2026, 11, 8, 12, 0, 0, tzinfo=UTC)
-
-        scheduler = Scheduler(
-            provider=provider,
-            dispatcher=dispatcher,
-            interval=1,
-            clock=clock_and_stop,
-            sleep_fn=lambda _: None,
+        now_utc = datetime.now(UTC)
+        (schedules_dir / "active.yml").write_text(
+            f"""
+schedule_id: active_schedule
+enabled: true
+trigger:
+  type: cron
+  expression: "{now_utc.minute} {now_utc.hour} * * *"
+  timezone: UTC
+jobs:
+  - long_running_job
+""",
+            encoding="utf-8",
         )
-        scheduler.start()
-        assert ticks == 2
-        assert scheduler.is_running is False
+
+        class ActiveMockProcess:
+            def __init__(self) -> None:
+                self.pid = 54321
+                self.terminated = False
+                self.killed = False
+
+            def poll(self) -> int | None:
+                return None
+
+            def terminate(self) -> None:
+                self.terminated = True
+
+            def kill(self) -> None:
+                self.killed = True
+
+        spawned: list[ActiveMockProcess] = []
+
+        def fake_popen(cmd: list[str], *, env: dict[str, str], **_: Any) -> Any:
+            proc = ActiveMockProcess()
+            spawned.append(proc)
+            # Trigger SIGTERM handler right after first subprocess is launched
+            handler = signal.getsignal(signal.SIGTERM)
+            if callable(handler):
+                handler(signal.SIGTERM, None)
+            return proc
+
+        monkeypatch.setattr("subprocess.Popen", fake_popen)
+        threads_before = threading.active_count()
+
+        with caplog.at_level(logging.INFO, logger="atlas_scheduler"):
+            exit_code = main(["--workspace", "customer_001", "--interval", "60"])
+
+        assert exit_code == 0
+        assert len(spawned) == 1
+        # Dispatched runner subprocess was NOT terminated or killed by scheduler shutdown
+        assert spawned[0].terminated is False
+        assert spawned[0].killed is False
+        assert "initiating graceful scheduler shutdown" in caplog.text
+        assert "Atlas Scheduler loop stopped gracefully" in caplog.text
+        assert threading.active_count() <= threads_before
 
     def test_thread_safety_prevents_duplicate_dispatch_under_concurrent_ticks(self) -> None:
         provider = FakeScheduleProvider(

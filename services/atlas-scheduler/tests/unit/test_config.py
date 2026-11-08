@@ -160,6 +160,14 @@ class TestScheduleAndTriggerDomainModels:
                 jobs=["morning_batch", "  "],
             )
 
+        # Duplicate job IDs inside jobs list
+        with pytest.raises((ValidationError, ScheduleValidationError), match="duplicate job ID"):
+            ScheduleDefinition(
+                schedule_id="duplicate_jobs",
+                trigger=valid_trigger,
+                jobs=["morning_batch", "financials_batch", "morning_batch"],
+            )
+
     def test_invalid_trigger_definitions_rejected(self) -> None:
         # Unsupported trigger type
         with pytest.raises((ValidationError, ScheduleValidationError), match="Only 'cron'"):

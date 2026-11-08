@@ -166,3 +166,46 @@ class TestRunnerDispatcher:
         assert "Failed to launch runner subprocess" in caplog.text
         assert dispatcher.active_count == 0
 
+    def test_launches_runner_when_started_outside_atlas_repository_root(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        external_cwd = tmp_path / "external_working_dir"
+        external_cwd.mkdir(parents=True, exist_ok=True)
+        monkeypatch.chdir(external_cwd)
+        monkeypatch.setenv("ATLAS_WORKSPACE", str(tmp_path / "workspaces"))
+
+        captured_cwd: list[str | None] = []
+        captured_cmd: list[list[str]] = []
+
+        def fake_popen(
+            cmd: list[str],
+            *,
+            env: dict[str, str],
+            cwd: str | None = None,
+            **_: Any,
+        ) -> Any:
+            captured_cmd.append(list(cmd))
+            captured_cwd.append(cwd)
+            return FakePopenProcess(cmd, env, pid=4050)
+
+        dispatcher = RunnerDispatcher(workspace="customer_001", popen_factory=fake_popen)
+        record = dispatcher.dispatch("daily_morning", "morning_batch")
+
+        assert record.launch_succeeded is True
+        assert dispatcher.working_directory is not None
+        assert (dispatcher.working_directory / "pyproject.toml").is_file()
+        assert dispatcher.working_directory != external_cwd.resolve()
+        assert captured_cwd == [str(dispatcher.working_directory)]
+        assert captured_cmd == [
+            [
+                "uv",
+                "run",
+                "atlas-runner",
+                "--workspace",
+                "customer_001",
+                "--job",
+                "morning_batch",
+            ]
+        ]

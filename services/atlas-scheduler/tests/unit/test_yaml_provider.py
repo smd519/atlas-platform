@@ -189,3 +189,87 @@ jobs:
         assert by_id["daily_morning"].jobs == ["morning_batch", "extra_batch"]
         assert by_id["evening_batch"].jobs == ["night_job"]
 
+    def test_duplicate_schedule_ids_across_files_are_excluded_deterministically(
+        self,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        conflict_a = _write_schedule(
+            tmp_path / "schedules" / "01_conflict_a.yml",
+            """
+schedule_id: duplicate_id
+name: Conflict A
+enabled: true
+trigger:
+  type: cron
+  expression: "0 6 * * *"
+  timezone: UTC
+jobs:
+  - job_a
+""",
+        )
+        conflict_b = _write_schedule(
+            tmp_path / "schedules" / "02_conflict_b.yaml",
+            """
+schedule_id: duplicate_id
+name: Conflict B
+enabled: true
+trigger:
+  type: cron
+  expression: "0 7 * * *"
+  timezone: UTC
+jobs:
+  - job_b
+""",
+        )
+        _write_schedule(
+            tmp_path / "schedules" / "03_unrelated_valid.yml",
+            """
+schedule_id: unrelated_valid
+name: Unrelated Valid
+enabled: true
+trigger:
+  type: cron
+  expression: "0 8 * * *"
+  timezone: UTC
+jobs:
+  - valid_job
+""",
+        )
+
+        provider = YamlScheduleProvider(workspace_path=tmp_path)
+        with caplog.at_level(logging.ERROR, logger="atlas_scheduler.providers.yaml"):
+            schedules = provider.get_schedules()
+
+        # Conflicting definitions are excluded; unrelated valid schedule still loads
+        assert [s.schedule_id for s in schedules] == ["unrelated_valid"]
+        assert "Duplicate schedule_id 'duplicate_id'" in caplog.text
+        assert str(conflict_a.resolve()) in caplog.text
+        assert str(conflict_b.resolve()) in caplog.text
+
+    def test_schedule_with_duplicate_job_ids_is_rejected_by_provider(
+        self,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        _write_schedule(
+            tmp_path / "schedules" / "duplicate_jobs.yml",
+            """
+schedule_id: dup_jobs_schedule
+enabled: true
+trigger:
+  type: cron
+  expression: "0 6 * * *"
+  timezone: UTC
+jobs:
+  - morning_batch
+  - morning_batch
+""",
+        )
+
+        provider = YamlScheduleProvider(workspace_path=tmp_path)
+        with caplog.at_level(logging.ERROR, logger="atlas_scheduler.providers.yaml"):
+            schedules = provider.get_schedules()
+
+        assert schedules == []
+        assert "duplicate job ID 'morning_batch'" in caplog.text
