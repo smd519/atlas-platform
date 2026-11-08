@@ -45,6 +45,7 @@ from atlas_orchestration.models import (
     ExecutionEvent,
     ExecutionEventListener,
     ExecutionEventPublisher,
+    JobResult,
     RetryPolicy,
     StepAttempt,
     StepCancelled,
@@ -61,6 +62,7 @@ from atlas_orchestration.models import (
     WorkflowStarted,
     WorkflowStep,
     WorkflowSucceeded,
+    WorkspaceContext,
     is_retryable_exception,
 )
 from atlas_orchestration.registry import WorkflowRegistry
@@ -99,6 +101,7 @@ __all__ = [
     "InvalidWorkflowDefinitionError",
     "InvalidWorkflowDependencyError",
     "InvalidWorkflowStateError",
+    "JobResult",
     "MockStepExecutor",
     "ModuleServiceProtocol",
     "OrchestrationDependencies",
@@ -139,6 +142,7 @@ __all__ = [
     "WorkflowValidationResult",
     "WorkflowValidator",
     "WorkflowVersionConflictError",
+    "WorkspaceContext",
     "__version__",
     "execute_with_timeout",
     "is_retryable_exception",
