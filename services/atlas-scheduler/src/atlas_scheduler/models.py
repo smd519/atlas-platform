@@ -233,6 +233,14 @@ def evaluate_most_recent_occurrence(
 ) -> datetime:
     """Calculate the most recent scheduled occurrence ``<= reference_time``.
 
+    Note
+    ----
+    Phase 1 supports timezone-aware cron scheduling using standard timezone
+    libraries. Special scheduling guarantees around daylight-saving transitions,
+    including nonexistent and ambiguous local times, are not explicitly
+    guaranteed. This behavior can be addressed in a future scheduling
+    enhancement.
+
     Parameters
     ----------
     expression:
@@ -288,7 +296,6 @@ def evaluate_most_recent_occurrence(
                     0,
                     0,
                     tzinfo=tz,
-                    fold=0,
                 )
                 cand_utc = local_dt.astimezone(UTC)
                 if cand_utc <= ref_utc and (best_utc is None or cand_utc > best_utc):
@@ -373,12 +380,18 @@ class ScheduleDefinition(BaseModel):
             )
 
         cleaned_jobs: list[str] = []
+        seen_jobs: set[str] = set()
         for idx, job in enumerate(self.jobs):
             clean_job = job.strip() if isinstance(job, str) else ""
             if not clean_job:
                 raise ScheduleValidationError(
                     f"Schedule '{clean_id}' contains an empty job ID at index {idx}."
                 )
+            if clean_job in seen_jobs:
+                raise ScheduleValidationError(
+                    f"Schedule '{clean_id}' contains duplicate job ID '{clean_job}'."
+                )
+            seen_jobs.add(clean_job)
             cleaned_jobs.append(clean_job)
 
         clean_name = self.name.strip() if isinstance(self.name, str) and self.name.strip() else None

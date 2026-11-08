@@ -50,8 +50,7 @@ class YamlScheduleProvider:
             if path.is_file() and path.suffix.lower() in (".yml", ".yaml")
         )
 
-        schedules: list[ScheduleDefinition] = []
-        seen_ids: set[str] = set()
+        candidates_by_id: dict[str, list[tuple[Path, ScheduleDefinition]]] = {}
 
         for file_path in yaml_files:
             try:
@@ -84,19 +83,22 @@ class YamlScheduleProvider:
                 )
                 continue
 
-            if schedule.schedule_id in seen_ids:
+            candidates_by_id.setdefault(schedule.schedule_id, []).append((file_path, schedule))
+
+        schedules: list[ScheduleDefinition] = []
+        for schedule_id, entries in candidates_by_id.items():
+            if len(entries) > 1:
+                conflicting_paths = ", ".join(str(fp) for fp, _ in entries)
                 logger.error(
-                    "Duplicate schedule_id '%s' in '%s'; skipping duplicate definition.",
-                    schedule.schedule_id,
-                    file_path,
+                    "Duplicate schedule_id '%s' defined in multiple files [%s]; "
+                    "excluding conflicting definitions.",
+                    schedule_id,
+                    conflicting_paths,
                 )
                 continue
-
-            seen_ids.add(schedule.schedule_id)
-            schedules.append(schedule)
+            schedules.append(entries[0][1])
 
         return schedules
 
 
 __all__ = ["YamlScheduleProvider"]
-

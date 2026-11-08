@@ -9,9 +9,14 @@ Architectural Boundary & Limitations
   survive scheduler process restarts; persistent execution history belongs to a
   future phase.
 - Phase 1 Misfire Policy: Uses a bounded misfire grace window
-  (default ``max(interval * 2, 300)`` seconds). Slightly delayed ticks within the
+  (``max(interval * 2, 300)`` seconds). Slightly delayed ticks within the
   grace window dispatch the due occurrence once; older historical occurrences
   outside the grace window are skipped to prevent unbounded replay backlogs.
+- Phase 1 Timezone & DST Scope: Phase 1 supports timezone-aware cron scheduling
+  using standard timezone libraries. Special scheduling guarantees around
+  daylight-saving transitions, including nonexistent and ambiguous local times,
+  are not explicitly guaranteed. This behavior can be addressed in a future
+  scheduling enhancement.
 """
 
 from __future__ import annotations
@@ -37,29 +42,16 @@ class Scheduler:
         dispatcher: RunnerDispatcher,
         interval: int = 60,
         *,
-        misfire_grace_seconds: int | None = None,
         clock: Callable[[], datetime] | None = None,
         sleep_fn: Callable[[float], None] | None = None,
     ) -> None:
         if isinstance(interval, bool) or not isinstance(interval, int) or interval <= 0:
             raise ValueError(f"Scheduler interval must be a positive integer, got {interval!r}.")
 
-        resolved_grace = (
-            misfire_grace_seconds if misfire_grace_seconds is not None else max(interval * 2, 300)
-        )
-        if (
-            isinstance(resolved_grace, bool)
-            or not isinstance(resolved_grace, int)
-            or resolved_grace < 0
-        ):
-            raise ValueError(
-                f"misfire_grace_seconds must be a non-negative integer, got {resolved_grace!r}."
-            )
-
         self._provider = provider
         self._dispatcher = dispatcher
         self._interval = interval
-        self._misfire_grace_seconds = resolved_grace
+        self._misfire_grace_seconds = max(interval * 2, 300)
         self._clock: Callable[[], datetime] = clock or (lambda: datetime.now(UTC))
         self._sleep_fn = sleep_fn
         self._lock = threading.RLock()

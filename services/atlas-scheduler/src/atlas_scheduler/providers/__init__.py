@@ -3,4 +3,3 @@
 from atlas_scheduler.providers.yaml_provider import YamlScheduleProvider
 
 __all__ = ["YamlScheduleProvider"]
-

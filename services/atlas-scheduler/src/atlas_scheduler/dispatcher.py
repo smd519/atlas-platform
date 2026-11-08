@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import logging
 import os
 import subprocess
@@ -9,11 +10,46 @@ import threading
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 from atlas_scheduler.config import WorkspaceContext
 
 logger = logging.getLogger("atlas_scheduler.dispatcher")
+
+
+def _resolve_default_working_directory() -> Path | None:
+    """Resolve the Atlas workspace/package root containing ``pyproject.toml``.
+
+    Ensures ``uv run atlas-runner`` can locate the workspace configuration even
+    when ``atlas-scheduler`` is invoked from an arbitrary working directory
+    outside the repository root.
+    """
+    current = Path(__file__).resolve()
+    discovered: Path | None = None
+    for parent in current.parents:
+        if (parent / "pyproject.toml").is_file():
+            discovered = parent
+    return discovered
+
+
+def _factory_accepts_cwd(factory: Callable[..., Any]) -> bool:
+    """Return True if ``factory`` accepts a ``cwd`` keyword argument."""
+    if factory is subprocess.Popen:
+        return True
+    try:
+        sig = inspect.signature(factory)
+    except (TypeError, ValueError):
+        return False
+    for param in sig.parameters.values():
+        if param.name == "cwd" and param.kind in (
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            inspect.Parameter.KEYWORD_ONLY,
+        ):
+            return True
+        if param.kind == inspect.Parameter.VAR_KEYWORD:
+            return True
+    return False
 
 
 @dataclass
@@ -41,6 +77,7 @@ class RunnerDispatcher:
         *,
         runner_command_prefix: Sequence[str] | None = None,
         env: Mapping[str, str] | None = None,
+        working_directory: Path | str | None = None,
         popen_factory: Callable[..., subprocess.Popen[Any]] | None = None,
     ) -> None:
         if isinstance(workspace, WorkspaceContext):
@@ -57,6 +94,11 @@ class RunnerDispatcher:
         self._workspace_id = ws_id
         self._command_prefix = tuple(runner_command_prefix or ("uv", "run", "atlas-runner"))
         self._env_overrides = dict(env) if env is not None else None
+        self._working_directory = (
+            Path(working_directory).resolve()
+            if working_directory is not None
+            else _resolve_default_working_directory()
+        )
         self._popen_factory = popen_factory
         self._lock = threading.RLock()
         self._records: list[DispatchedProcessRecord] = []
@@ -66,6 +108,11 @@ class RunnerDispatcher:
     def workspace_id(self) -> str:
         """Return the workspace identifier (logical ID or absolute path) passed to runner."""
         return self._workspace_id
+
+    @property
+    def working_directory(self) -> Path | None:
+        """Return the resolved working directory used when spawning runner subprocesses."""
+        return self._working_directory
 
     @property
     def records(self) -> list[DispatchedProcessRecord]:
@@ -113,7 +160,10 @@ class RunnerDispatcher:
 
         try:
             factory = self._popen_factory if self._popen_factory is not None else subprocess.Popen
-            proc = factory(cmd, env=env)
+            if self._working_directory is not None and _factory_accepts_cwd(factory):
+                proc = factory(cmd, env=env, cwd=str(self._working_directory))
+            else:
+                proc = factory(cmd, env=env)
             pid = getattr(proc, "pid", None)
             record = DispatchedProcessRecord(
                 schedule_id=schedule_id,

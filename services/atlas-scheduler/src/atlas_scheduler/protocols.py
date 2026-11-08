@@ -17,4 +17,3 @@ class ScheduleProvider(Protocol):
 
 
 __all__ = ["ScheduleProvider"]
-
