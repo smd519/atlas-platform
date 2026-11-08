@@ -1,11 +1,13 @@
-"""Configuration models for atlas-runner."""
+"""Configuration and validation models for atlas-runner."""
 
 from __future__ import annotations
 
 import copy
+from pathlib import Path
 from typing import Any
 
 from atlas_core import require_not_empty
+from atlas_orchestration import WorkflowDefinition
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
 
@@ -38,9 +40,25 @@ class JobDefinition(BaseModel):
         return self
 
 
+class ValidationReport(BaseModel):
+    """Result of dry-run job and workflow validation (--validate-only)."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    is_valid: bool = True
+    job_id: str
+    job_file: Path
+    workflow_id: str
+    workflow_version: int
+    workflow_file: Path
+    topological_order: tuple[str, ...]
+    workflow: WorkflowDefinition
+
+
 JobManifest = JobDefinition
 
 __all__ = [
     "JobDefinition",
     "JobManifest",
+    "ValidationReport",
 ]
