@@ -1,5 +1,7 @@
 """Atlas Runner — Hardened YAML-driven workflow execution and validation entry point."""
 
+from atlas_orchestration import JobResult, WorkspaceContext
+
 from atlas_runner.cli import (
     build_argument_parser,
     format_execution_report,
@@ -14,7 +16,10 @@ from atlas_runner.config import (
     load_workflow_definition,
     load_yaml_file,
     merge_parameters,
+    resolve_job_reference,
     resolve_step_paths,
+    resolve_workflow_reference,
+    resolve_workspace,
     resolve_workspace_path,
     validate_workflow_dag,
 )
@@ -37,10 +42,12 @@ __all__ = [
     "AtlasRunner",
     "JobDefinition",
     "JobManifest",
+    "JobResult",
     "RunnerConfigurationError",
     "RunnerError",
     "RunnerExecutionError",
     "ValidationReport",
+    "WorkspaceContext",
     "WorkspaceIsolationError",
     "__version__",
     "apply_job_parameters_to_workflow_data",
@@ -56,7 +63,10 @@ __all__ = [
     "load_yaml_file",
     "main",
     "merge_parameters",
+    "resolve_job_reference",
     "resolve_step_paths",
+    "resolve_workflow_reference",
+    "resolve_workspace",
     "resolve_workspace_path",
     "validate_workflow_dag",
 ]

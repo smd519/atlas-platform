@@ -1,0 +1,55 @@
+workflow_id: sensors_pipeline
+name: Sensors Pipeline
+description: End-to-end ingestion, transformation, and quality assessment for sensor readings.
+version: 1
+steps:
+  - step_id: ingest
+    module_target: atlas-ingestion
+    action: ingest
+    parameters:
+      dataset_id: sensors_default
+      source_format: csv
+      source:
+        source_id: sensors_csv
+        source_name: Sensors CSV
+        source_type: local_file
+        config:
+          path: drop/sensors.csv
+      destination:
+        layer: bronze
+        path: data/bronze/sensors.parquet
+        format: parquet
+
+  - step_id: process
+    module_target: atlas-processing
+    action: transform
+    depends_on:
+      - ingest
+    parameters:
+      dataset_id: "${steps.ingest.dataset_id}"
+      source: "${steps.ingest.destination}"
+      destination:
+        layer: silver
+        path: data/silver/sensors.parquet
+        format: parquet
+      transformations:
+        - transformation_id: filter
+          name: remove_missing_temperature
+          params:
+            column: temperature
+            operator: not_null
+
+  - step_id: quality
+    module_target: atlas-quality
+    action: assess
+    depends_on:
+      - process
+    parameters:
+      dataset_id: "${steps.process.dataset_id}"
+      storage_location: "${steps.process.destination}"
+      rules:
+        - rule_id: completeness.not_null
+          name: sensor_id_required
+          params:
+            column: sensor_id
+

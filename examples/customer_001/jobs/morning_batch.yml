@@ -1,0 +1,8 @@
+# jobs/morning_batch.yml
+job_id: morning_batch
+name: Morning Batch
+description: Daily ingestion and processing batch.
+
+workflows:
+  - corporations_pipeline
+  - sensors_pipeline

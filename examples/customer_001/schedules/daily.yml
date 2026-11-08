@@ -1,0 +1,12 @@
+# schedules/daily.yml
+schedule_id: daily_morning
+name: Daily Morning Schedule
+description: Executes the morning batch every day.
+
+trigger:
+  type: cron
+  expression: "0 6 * * *"
+  timezone: America/Toronto
+
+jobs:
+  - morning_batch

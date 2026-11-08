@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import os
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -16,11 +17,67 @@ from atlas_orchestration import (
     WorkflowDefinition,
     WorkflowValidationResult,
     WorkflowValidator,
+    WorkspaceContext,
 )
 from pydantic import ValidationError
 
 from atlas_runner.exceptions import RunnerConfigurationError, WorkspaceIsolationError
 from atlas_runner.models import JobDefinition
+
+
+def resolve_workspace(
+    workspace: str | Path,
+    *,
+    config_file: str | Path | None = None,
+    field: str = "workspace",
+) -> WorkspaceContext:
+    """Resolve ``workspace`` (absolute path or logical ID) into a :class:`WorkspaceContext`.
+
+    Resolution Rules
+    ----------------
+    - If ``workspace`` is an absolute path, use it directly.
+    - If ``workspace`` is a logical ID (non-absolute path, e.g. ``customer_001``),
+      require the ``ATLAS_WORKSPACE`` environment variable and resolve to
+      ``$ATLAS_WORKSPACE/<logical_workspace_id>``.
+    """
+    cfg_str = str(config_file) if config_file is not None else None
+    ws_str = str(workspace).strip() if workspace is not None else ""
+    if not ws_str:
+        raise RunnerConfigurationError(
+            "Workspace path must not be empty.",
+            config_file=cfg_str,
+            field=field,
+        )
+
+    ws_path = Path(ws_str)
+    if ws_path.is_absolute():
+        resolved_root = ws_path.resolve()
+        logical_id = resolved_root.name or str(resolved_root)
+        return WorkspaceContext(workspace_id=logical_id, root_path=resolved_root)
+
+    atlas_ws_env = os.environ.get("ATLAS_WORKSPACE", "").strip()
+    if not atlas_ws_env:
+        raise RunnerConfigurationError(
+            f"Cannot resolve logical workspace '{ws_str}': environment variable "
+            "'ATLAS_WORKSPACE' must be set when using a logical workspace ID "
+            "(or provide an absolute --workspace path).",
+            config_file=cfg_str,
+            field=field,
+        )
+
+    base_root = Path(atlas_ws_env).expanduser().resolve()
+    candidate = (base_root / ws_path).resolve()
+    if not candidate.is_relative_to(base_root) or candidate == base_root:
+        raise WorkspaceIsolationError(
+            f"Workspace isolation violation: logical workspace '{ws_str}' resolves to "
+            f"'{candidate}', which escapes ATLAS_WORKSPACE boundary '{base_root}'.",
+            config_file=cfg_str,
+            field=field,
+            offending_path=ws_str,
+            workspace=str(base_root),
+        )
+
+    return WorkspaceContext(workspace_id=ws_str, root_path=candidate)
 
 
 def resolve_workspace_path(
@@ -35,19 +92,18 @@ def resolve_workspace_path(
     Raises
     ------
     RunnerConfigurationError
-        If ``workspace`` or ``target`` is empty.
+        If ``workspace`` or ``target`` is empty, or ``ATLAS_WORKSPACE`` is unset
+        for a logical workspace ID.
     WorkspaceIsolationError
         If the resolved path escapes ``workspace`` via relative traversal
         (e.g. ``../../etc/shadow``) or an external absolute path.
     """
     cfg_str = str(config_file) if config_file is not None else None
-    ws_str = str(workspace).strip() if workspace is not None else ""
-    if not ws_str:
-        raise RunnerConfigurationError(
-            "Workspace path must not be empty.",
-            config_file=cfg_str,
-            field=field or "workspace",
-        )
+    ws_ctx = resolve_workspace(
+        workspace,
+        config_file=config_file,
+        field=field or "workspace",
+    )
 
     target_str = str(target).strip() if target is not None else ""
     if not target_str:
@@ -57,7 +113,7 @@ def resolve_workspace_path(
             field=field or "path",
         )
 
-    workspace_root = Path(ws_str).resolve()
+    workspace_root = ws_ctx.root_path
     target_path = Path(target_str)
     if target_path.is_absolute():
         resolved = target_path.resolve()
@@ -457,12 +513,57 @@ def extract_error_context(
     return resolved_file, resolved_field, detail
 
 
+def resolve_job_reference(
+    workspace: str | Path,
+    job_path: str | Path,
+    *,
+    config_file: str | Path | None = None,
+    field: str = "job_path",
+) -> Path:
+    """Resolve a job reference (logical ID or relative YAML path) inside ``workspace``.
+
+    If ``job_path`` does not end in ``.yml`` or ``.yaml``, assumes the managed
+    workspace contract and resolves to ``{workspace_path}/jobs/{job_id}.yml``.
+    """
+    ws_ctx = resolve_workspace(workspace, config_file=config_file, field="workspace")
+    workspace_root = ws_ctx.root_path
+
+    job_str = str(job_path).strip() if job_path is not None else ""
+    if not job_str:
+        raise RunnerConfigurationError(
+            "Job path or logical ID must not be empty.",
+            config_file=str(config_file) if config_file is not None else None,
+            field=field,
+        )
+
+    # Always audit raw job_str against workspace_root first to catch traversal attempts.
+    direct_resolved = resolve_workspace_path(
+        workspace_root,
+        job_str,
+        config_file=config_file,
+        field=field,
+    )
+
+    if job_str.lower().endswith((".yml", ".yaml")):
+        return direct_resolved
+
+    rel_target = (
+        f"{job_str}.yml" if job_str.startswith(("jobs/", "jobs\\")) else f"jobs/{job_str}.yml"
+    )
+    return resolve_workspace_path(
+        workspace_root,
+        rel_target,
+        config_file=config_file,
+        field=field,
+    )
+
+
 def load_job_definition(
     workspace: str | Path,
     job_path: str | Path,
 ) -> tuple[JobDefinition, Path]:
     """Load and validate a :class:`JobDefinition` from ``job_path`` within ``workspace``."""
-    resolved_job_path = resolve_workspace_path(
+    resolved_job_path = resolve_job_reference(
         workspace,
         job_path,
         field="job_path",
@@ -472,13 +573,23 @@ def load_job_definition(
         job_def = JobDefinition.model_validate(raw_job)
     except ValidationError as exc:
         err_field = _format_pydantic_loc(exc.errors()[0].get("loc", ())) if exc.errors() else "root"
+        if err_field == "root":
+            msg = str(exc)
+            if "workflows" in msg and "workflow_ref" not in raw_job:
+                err_field = "workflows"
+            elif "workflow_ref" in msg:
+                err_field = "workflow_ref"
         _annotate_exception(exc, config_file=resolved_job_path, field=err_field)
         raise
     except Exception as exc:
         err_field = (
             "job_id"
             if "job_id" in str(exc)
-            else ("workflow_ref" if "workflow_ref" in str(exc) else "root")
+            else (
+                "workflows"
+                if "workflows" in str(exc)
+                else ("workflow_ref" if "workflow_ref" in str(exc) else "root")
+            )
         )
         raise RunnerConfigurationError(
             f"Invalid job configuration in '{resolved_job_path}' (field '{err_field}'): {exc}",
@@ -488,19 +599,105 @@ def load_job_definition(
     return job_def, resolved_job_path
 
 
+def resolve_workflow_reference(
+    workspace: str | Path,
+    workflow_ref: str | Path,
+    *,
+    config_file: str | Path | None = None,
+    field: str = "workflow_ref",
+) -> Path:
+    """Resolve a workflow reference (logical ID or relative YAML path) inside ``workspace``.
+
+    Supports both:
+    - Explicit workspace-relative paths (e.g. ``workflows/corporations-pipeline.yml``)
+    - Logical workflow names (e.g. ``corporations_pipeline`` resolving to
+      ``workflows/corporations_pipeline.yml`` or ``workflows/corporations-pipeline.yml``)
+
+    Raises :class:`WorkspaceIsolationError` if the reference attempts to escape ``workspace``.
+    """
+    ref_str = str(workflow_ref).strip() if workflow_ref is not None else ""
+    if not ref_str:
+        raise RunnerConfigurationError(
+            "Workflow reference must not be empty.",
+            config_file=str(config_file) if config_file is not None else None,
+            field=field,
+        )
+
+    # Always audit the raw reference against the workspace boundary first.
+    direct_resolved = resolve_workspace_path(
+        workspace,
+        ref_str,
+        config_file=config_file,
+        field=field,
+    )
+
+    has_path_sep = "/" in ref_str or "\\" in ref_str
+    has_yaml_ext = ref_str.lower().endswith((".yml", ".yaml"))
+
+    if has_path_sep or has_yaml_ext or Path(ref_str).is_absolute():
+        if direct_resolved.exists() and direct_resolved.is_file():
+            return direct_resolved
+        if not has_path_sep and has_yaml_ext:
+            in_workflows = resolve_workspace_path(
+                workspace,
+                f"workflows/{ref_str}",
+                config_file=config_file,
+                field=field,
+            )
+            if in_workflows.exists() and in_workflows.is_file():
+                return in_workflows
+        return direct_resolved
+
+    # Bare workflow identifier (e.g. "corporations_pipeline" or "sensors_pipeline")
+    stem_variants = [ref_str]
+    if "_" in ref_str:
+        stem_variants.append(ref_str.replace("_", "-"))
+    if "-" in ref_str:
+        stem_variants.append(ref_str.replace("-", "_"))
+
+    candidates: list[Path] = []
+    for stem in stem_variants:
+        for ext in (".yml", ".yaml"):
+            candidates.append(
+                resolve_workspace_path(
+                    workspace,
+                    f"workflows/{stem}{ext}",
+                    config_file=config_file,
+                    field=field,
+                )
+            )
+    for stem in stem_variants:
+        for ext in (".yml", ".yaml"):
+            candidates.append(
+                resolve_workspace_path(
+                    workspace,
+                    f"{stem}{ext}",
+                    config_file=config_file,
+                    field=field,
+                )
+            )
+
+    for candidate in candidates:
+        if candidate.exists() and candidate.is_file():
+            return candidate
+
+    return candidates[0]
+
+
 def load_workflow_definition(
     workspace: str | Path,
     workflow_ref: str | Path,
     *,
     job_parameters: Mapping[str, Any] | None = None,
     job_file: str | Path | None = None,
+    field: str = "workflow_ref",
 ) -> tuple[WorkflowDefinition, dict[str, Any], Path]:
     """Load, merge parameters, audit paths, and construct a :class:`WorkflowDefinition`."""
-    resolved_wf_path = resolve_workspace_path(
+    resolved_wf_path = resolve_workflow_reference(
         workspace,
         workflow_ref,
         config_file=job_file,
-        field="workflow_ref",
+        field=field,
     )
     raw_workflow = load_yaml_file(resolved_wf_path)
     prepared_data, merged_params = apply_job_parameters_to_workflow_data(
@@ -542,7 +739,10 @@ __all__ = [
     "load_workflow_definition",
     "load_yaml_file",
     "merge_parameters",
+    "resolve_job_reference",
     "resolve_step_paths",
+    "resolve_workflow_reference",
+    "resolve_workspace",
     "resolve_workspace_path",
     "validate_workflow_dag",
 ]
