@@ -5,10 +5,17 @@ build-backend = "hatchling.build"
 [project]
 name = "atlas-scheduler"
 version = "0.1.0"
-description = ""
+description = "Control-plane schedule discovery, trigger evaluation, and job dispatch service for Atlas Platform."
 readme = "README.md"
 requires-python = ">=3.12,<3.14"
-dependencies = []
+dependencies = [
+    "atlas-core",
+    "pydantic>=2.14.2",
+    "pyyaml>=6.0.3",
+]
+
+[project.scripts]
+atlas-scheduler = "atlas_scheduler.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/atlas_scheduler"]
