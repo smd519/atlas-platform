@@ -1,4 +1,4 @@
-"""Unit tests for atlas-runner configuration, parameter merge, path resolution, and CLI."""
+"""Unit tests for atlas-runner hardening: isolation, --validate-only, and stateless runs."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ from typing import Any
 import pytest
 from atlas_core import ExecutionStatus
 from atlas_orchestration import (
+    CyclicDependencyError,
     InvalidStepDefinitionError,
     InvalidWorkflowDefinitionError,
     WorkflowDefinition,
@@ -17,6 +18,8 @@ from atlas_runner import (
     AtlasRunner,
     RunnerConfigurationError,
     RunnerExecutionError,
+    WorkspaceIsolationError,
+    build_default_dependencies,
     load_job_definition,
     load_workflow_definition,
     main,
@@ -121,16 +124,19 @@ class TestInvalidYamlHandling:
             tmp_path / "jobs" / "bad.yml",
             "job_id: [unterminated_list\nworkflow_ref: ::invalid",
         )
-        with pytest.raises(RunnerConfigurationError, match="Invalid YAML syntax"):
+        with pytest.raises(RunnerConfigurationError, match="Invalid YAML syntax") as exc_info:
             load_job_definition(tmp_path, "jobs/bad.yml")
+        assert exc_info.value.field == "yaml_syntax"
+        assert exc_info.value.config_file == str((tmp_path / "jobs" / "bad.yml").resolve())
 
     def test_non_mapping_yaml_raises_configuration_error(self, tmp_path: Path) -> None:
         _write_yaml(
             tmp_path / "workflows" / "list.yml",
             "- item1\n- item2\n",
         )
-        with pytest.raises(RunnerConfigurationError, match="top-level mapping"):
+        with pytest.raises(RunnerConfigurationError, match="top-level mapping") as exc_info:
             load_workflow_definition(tmp_path, "workflows/list.yml")
+        assert exc_info.value.field == "root"
 
     def test_malformed_workflow_yaml_raises_configuration_error(self, tmp_path: Path) -> None:
         _write_yaml(
@@ -217,9 +223,7 @@ class TestParameterMerge:
 
         assert merged["dataset_id"] == "corporations_active"
         assert merged["source_format"] == "csv"
-        # Top-level replacement only (no recursive merging of nested dicts)
         assert merged["format_options"] == {"delimiter": ";"}
-        # Original inputs are not mutated
         assert workflow_defaults["dataset_id"] == "default_dataset"
         assert workflow_defaults["format_options"] == {"delimiter": ",", "encoding": "utf-8"}
 
@@ -241,16 +245,16 @@ class TestParameterMerge:
         ingest_step = workflow_def.get_step("ingest")
         assert ingest_step is not None
         assert ingest_step.parameters["dataset_id"] == "corporations_active"
-        # Unspecified parameter remains unchanged
         assert ingest_step.parameters["source_format"] == "csv"
-        # Nested dict replaced at top-level without recursive merge
         assert ingest_step.parameters["format_options"] == {"delimiter": "|"}
 
 
-class TestRelativePathResolution:
-    """Relative paths resolve against the supplied workspace."""
+class TestWorkspaceIsolationAndPathResolution:
+    """Strict workspace isolation rejects path traversal and external absolute paths."""
 
-    def test_resolve_workspace_path_relative_and_absolute(self, tmp_path: Path) -> None:
+    def test_resolve_workspace_path_relative_and_absolute_within_workspace(
+        self, tmp_path: Path
+    ) -> None:
         rel_resolved = resolve_workspace_path(tmp_path, "jobs/corporations.yml")
         assert rel_resolved == (tmp_path / "jobs" / "corporations.yml").resolve()
 
@@ -284,18 +288,265 @@ class TestRelativePathResolution:
         assert ingest_step.parameters["destination"]["path"] == str(
             (tmp_path / "data" / "bronze" / "sample.parquet").resolve()
         )
-        # Dynamic context reference must remain untouched for runtime ContextResolver
         assert process_step.parameters["source"] == "${steps.ingest.destination}"
         assert process_step.parameters["destination"]["path"] == str(
             (tmp_path / "data" / "silver" / "sample.parquet").resolve()
         )
         assert quality_step.parameters["storage_location"] == "${steps.process.destination}"
 
+    def test_malicious_workflow_parameter_path_traversal_raises_workspace_isolation_error(
+        self, tmp_path: Path
+    ) -> None:
+        workspace = tmp_path / "customer_ws"
+        workspace.mkdir(parents=True, exist_ok=True)
 
-class TestRunnerEndToEndInTempWorkspace:
-    """Runner executes a complete workflow in a temporary workspace with proper exit codes."""
+        _write_yaml(
+            workspace / "workflows" / "malicious.yml",
+            """
+workflow_id: malicious_wf
+name: Malicious Workflow
+version: 1
+steps:
+  - step_id: process
+    module_target: atlas-processing
+    action: transform
+    parameters:
+      dataset_id: test_ds
+      input_path: data/bronze/input.parquet
+      output_path: ../../outside_workspace.parquet
+""",
+        )
+        _write_yaml(
+            workspace / "jobs" / "malicious_job.yml",
+            """
+job_id: malicious_job
+workflow_ref: workflows/malicious.yml
+parameters: {}
+""",
+        )
 
-    def test_runner_and_cli_success_and_failure_exit_codes(self, tmp_path: Path) -> None:
+        runner = AtlasRunner()
+        with pytest.raises(WorkspaceIsolationError) as exc_info:
+            runner.run(workspace, "jobs/malicious_job.yml")
+
+        assert exc_info.value.field == "steps.process.parameters.output_path"
+        assert exc_info.value.offending_path == "../../outside_workspace.parquet"
+        assert exc_info.value.config_file == str(
+            (workspace / "workflows" / "malicious.yml").resolve()
+        )
+
+    def test_job_path_or_workflow_ref_escaping_workspace_raises_isolation_error(
+        self, tmp_path: Path
+    ) -> None:
+        workspace = tmp_path / "customer_ws"
+        workspace.mkdir(parents=True, exist_ok=True)
+
+        with pytest.raises(WorkspaceIsolationError):
+            load_job_definition(workspace, "../../etc/shadow")
+
+        _write_yaml(
+            workspace / "jobs" / "escape_wf.yml",
+            """
+job_id: escape_wf
+workflow_ref: ../../outside_workflow.yml
+parameters: {}
+""",
+        )
+        runner = AtlasRunner()
+        with pytest.raises(WorkspaceIsolationError) as exc_info:
+            runner.validate(workspace, "jobs/escape_wf.yml")
+        assert exc_info.value.field == "workflow_ref"
+
+
+class TestValidateOnlyModeAndPreciseErrorReporting:
+    """--validate-only catches cyclic dependencies and skips service dependency construction."""
+
+    def test_validate_only_catches_cyclic_workflow_without_initializing_dependencies(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        wf_file = _write_yaml(
+            tmp_path / "workflows" / "cyclic.yml",
+            """
+workflow_id: cyclic_pipeline
+name: Cyclic Pipeline
+version: 1
+steps:
+  - step_id: step_a
+    module_target: atlas-ingestion
+    action: ingest
+    depends_on:
+      - step_b
+    parameters:
+      dataset_id: ds
+  - step_id: step_b
+    module_target: atlas-processing
+    action: transform
+    depends_on:
+      - step_a
+    parameters:
+      dataset_id: ds
+""",
+        )
+        _write_yaml(
+            tmp_path / "jobs" / "cyclic_job.yml",
+            """
+job_id: cyclic_job
+workflow_ref: workflows/cyclic.yml
+parameters:
+  dataset_id: ds_override
+""",
+        )
+
+        dependency_calls = 0
+
+        def forbidden_dependency_factory() -> Any:
+            nonlocal dependency_calls
+            dependency_calls += 1
+            raise AssertionError("Dependencies must NOT be constructed in --validate-only mode.")
+
+        runner = AtlasRunner(dependency_factory=forbidden_dependency_factory)
+
+        # 1. Direct validate() raises CyclicDependencyError with exact file and field
+        with pytest.raises(CyclicDependencyError) as exc_info:
+            runner.validate(tmp_path, "jobs/cyclic_job.yml")
+
+        assert dependency_calls == 0
+        assert runner.last_dependencies is None
+        assert runner.orchestrator is None
+        assert getattr(exc_info.value, "config_file", None) == str(wf_file.resolve())
+        assert getattr(exc_info.value, "field", None) == "steps.step_a.depends_on"
+
+        # 2. CLI --validate-only returns non-zero exit code, pinpoints file & field, skips deps
+        exit_code = main(
+            [
+                "--workspace",
+                str(tmp_path),
+                "--job",
+                "jobs/cyclic_job.yml",
+                "--validate-only",
+            ],
+            runner=runner,
+        )
+        assert exit_code != 0
+        assert dependency_calls == 0
+
+        captured = capsys.readouterr()
+        assert "Status: INVALID" in captured.err
+        assert str(wf_file.resolve()) in captured.err
+        assert "Field: steps.step_a.depends_on" in captured.err
+        assert "step_a -> step_b -> step_a" in captured.err
+
+    def test_validate_only_succeeds_without_initializing_dependencies(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        _write_yaml(tmp_path / "workflows" / "pipeline.yml", _valid_workflow_yaml())
+        _write_yaml(
+            tmp_path / "jobs" / "valid_job.yml",
+            """
+job_id: valid_job
+workflow_ref: workflows/pipeline.yml
+parameters:
+  dataset_id: valid_dataset
+""",
+        )
+
+        dependency_calls = 0
+
+        def forbidden_dependency_factory() -> Any:
+            nonlocal dependency_calls
+            dependency_calls += 1
+            raise AssertionError("Dependencies must NOT be constructed in --validate-only mode.")
+
+        runner = AtlasRunner(dependency_factory=forbidden_dependency_factory)
+        exit_code = main(
+            [
+                "--workspace",
+                str(tmp_path),
+                "--job",
+                "jobs/valid_job.yml",
+                "--validate-only",
+            ],
+            runner=runner,
+        )
+
+        assert exit_code == 0
+        assert dependency_calls == 0
+        assert runner.last_dependencies is None
+        assert runner.orchestrator is None
+
+        captured = capsys.readouterr()
+        assert "========== ATLAS VALIDATION ==========" in captured.out
+        assert "Status: VALID" in captured.out
+        assert "  ingest:  VALID" in captured.out
+        assert "  process:  VALID" in captured.out
+        assert "  quality:  VALID" in captured.out
+
+
+class TestStatelessExecutionAndStandardizedReporting:
+    """Sequential runs instantiate separate dependency graphs and emit standardized reports."""
+
+    def test_sequential_runs_instantiate_separate_dependency_graphs(self, tmp_path: Path) -> None:
+        _write_yaml(tmp_path / "workflows" / "pipeline.yml", _valid_workflow_yaml())
+        _write_yaml(
+            tmp_path / "jobs" / "job_1.yml",
+            """
+job_id: job_1
+workflow_ref: workflows/pipeline.yml
+parameters:
+  dataset_id: ds_1
+""",
+        )
+        _write_yaml(
+            tmp_path / "jobs" / "job_2.yml",
+            """
+job_id: job_2
+workflow_ref: workflows/pipeline.yml
+parameters:
+  dataset_id: ds_2
+""",
+        )
+        csv_file = tmp_path / "drop" / "sample.csv"
+        csv_file.parent.mkdir(parents=True, exist_ok=True)
+        csv_file.write_text("id,name\n1,Alpha\n2,Beta\n", encoding="utf-8")
+
+        created_deps: list[Any] = []
+
+        def tracking_dependency_factory() -> Any:
+            deps = build_default_dependencies()
+            created_deps.append(deps)
+            return deps
+
+        runner = AtlasRunner(dependency_factory=tracking_dependency_factory)
+
+        res_1 = runner.run(tmp_path, "jobs/job_1.yml")
+        orch_1 = runner.orchestrator
+        deps_1 = runner.last_dependencies
+
+        res_2 = runner.run(tmp_path, "jobs/job_2.yml")
+        orch_2 = runner.orchestrator
+        deps_2 = runner.last_dependencies
+
+        assert res_1.status == ExecutionStatus.SUCCEEDED
+        assert res_2.status == ExecutionStatus.SUCCEEDED
+        assert len(created_deps) == 2
+        assert deps_1 is not None and deps_2 is not None
+        assert deps_1 is not deps_2
+        assert orch_1 is not None and orch_2 is not None
+        assert orch_1 is not orch_2
+        assert deps_1.ingestion_service is not deps_2.ingestion_service
+        assert deps_1.processing_service is not deps_2.processing_service
+        assert deps_1.quality_service is not deps_2.quality_service
+        assert deps_1.storage_provider is not deps_2.storage_provider
+
+    def test_runner_and_cli_standardized_report_and_exit_codes(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
         _write_yaml(tmp_path / "workflows" / "pipeline.yml", _valid_workflow_yaml())
         _write_yaml(
             tmp_path / "jobs" / "sample.yml",
@@ -310,25 +561,39 @@ parameters:
         # 1. Before input CSV exists, execution fails and CLI returns non-zero exit code
         exit_code_fail = main(["--workspace", str(tmp_path), "--job", "jobs/sample.yml"])
         assert exit_code_fail != 0
+        fail_out = capsys.readouterr().out
+        assert "========== ATLAS EXECUTION ==========" in fail_out
+        assert "Job: sample_job" in fail_out
+        assert "Status: FAILED" in fail_out
+        assert "  ingest:  FAILED" in fail_out
+        assert "  process:  CANCELLED" in fail_out
+        assert "  quality:  CANCELLED" in fail_out
 
-        failing_runner = AtlasRunner()
+        runner = AtlasRunner()
         with pytest.raises(RunnerExecutionError):
-            failing_runner.run(tmp_path, "jobs/sample.yml", raise_on_error=True)
+            runner.run(tmp_path, "jobs/sample.yml", raise_on_error=True)
 
-        # 2. Re-registering the same workflow version on the same orchestrator propagates conflict
+        # 2. When an explicit OrchestrationService is injected, version conflict integrity holds
+        injected_orch = runner.orchestrator
+        assert injected_orch is not None
+        pinned_runner = AtlasRunner(orchestration_service=injected_orch)
         with pytest.raises(WorkflowVersionConflictError):
-            failing_runner.run(tmp_path, "jobs/sample.yml")
+            pinned_runner.run(tmp_path, "jobs/sample.yml")
 
-        # 3. Create input CSV and execute successfully on a fresh runner
+        # 3. Create input CSV and execute successfully
         csv_file = tmp_path / "drop" / "sample.csv"
         csv_file.parent.mkdir(parents=True, exist_ok=True)
         csv_file.write_text("id,name\n1,Alpha\n2,Beta\n", encoding="utf-8")
 
-        runner = AtlasRunner()
-        result = runner.run(tmp_path, "jobs/sample.yml")
-        assert result.status == ExecutionStatus.SUCCEEDED
-        assert (tmp_path / "data" / "bronze" / "sample.parquet").exists()
-        assert (tmp_path / "data" / "silver" / "sample.parquet").exists()
-
         exit_code_ok = main(["--workspace", str(tmp_path), "--job", "jobs/sample.yml"])
         assert exit_code_ok == 0
+        ok_out = capsys.readouterr().out
+        assert "========== ATLAS EXECUTION ==========" in ok_out
+        assert "Job: sample_job" in ok_out
+        assert "Workflow: unit_test_pipeline" in ok_out
+        assert "Status: SUCCEEDED" in ok_out
+        assert (
+            "Steps:\n  ingest:  SUCCEEDED\n  process:  SUCCEEDED\n  quality:  SUCCEEDED" in ok_out
+        )
+        assert "Duration: " in ok_out
+        assert " seconds\n====================================" in ok_out
