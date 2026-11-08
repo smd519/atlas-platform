@@ -11,8 +11,10 @@ from atlas_orchestration import (
     CyclicDependencyError,
     InvalidStepDefinitionError,
     InvalidWorkflowDefinitionError,
+    JobResult,
     WorkflowDefinition,
     WorkflowVersionConflictError,
+    WorkspaceContext,
 )
 from atlas_runner import (
     AtlasRunner,
@@ -20,10 +22,12 @@ from atlas_runner import (
     RunnerExecutionError,
     WorkspaceIsolationError,
     build_default_dependencies,
+    create_orchestration_service,
     load_job_definition,
     load_workflow_definition,
     main,
     merge_parameters,
+    resolve_workflow_reference,
     resolve_workspace_path,
 )
 from pydantic import ValidationError
@@ -597,3 +601,161 @@ parameters:
         )
         assert "Duration: " in ok_out
         assert " seconds\n====================================" in ok_out
+
+
+class TestBatchWorkflowAssemblyAndHandoff:
+    """Runner batch Job YAML loading, workflow resolution, assembly, and execute_job() handoff."""
+
+    def test_load_job_yaml_with_multiple_workflows_and_resolve_references(
+        self, tmp_path: Path
+    ) -> None:
+        _write_yaml(
+            tmp_path / "jobs" / "morning_batch.yml",
+            """
+job_id: morning_batch
+name: Morning Batch
+description: Daily ingestion and processing batch.
+
+workflows:
+  - corporations_pipeline
+  - sensors_pipeline
+""",
+        )
+        _write_yaml(
+            tmp_path / "workflows" / "corporations-pipeline.yml",
+            _valid_workflow_yaml().replace("unit_test_pipeline", "corporations_pipeline"),
+        )
+        _write_yaml(
+            tmp_path / "workflows" / "sensors_pipeline.yml",
+            _valid_workflow_yaml().replace("unit_test_pipeline", "sensors_pipeline"),
+        )
+
+        job_def, resolved_job = load_job_definition(tmp_path, "jobs/morning_batch.yml")
+        assert job_def.job_id == "morning_batch"
+        assert job_def.name == "Morning Batch"
+        assert job_def.workflows == ["corporations_pipeline", "sensors_pipeline"]
+        assert resolved_job == (tmp_path / "jobs" / "morning_batch.yml").resolve()
+
+        # Logical workflow names resolve to files in workflows/ (including hyphen/underscore)
+        corp_path = resolve_workflow_reference(tmp_path, "corporations_pipeline")
+        sensors_path = resolve_workflow_reference(tmp_path, "sensors_pipeline")
+        assert corp_path == (tmp_path / "workflows" / "corporations-pipeline.yml").resolve()
+        assert sensors_path == (tmp_path / "workflows" / "sensors_pipeline.yml").resolve()
+
+        wf_1, _, _ = load_workflow_definition(tmp_path, "corporations_pipeline")
+        wf_2, _, _ = load_workflow_definition(tmp_path, "sensors_pipeline")
+        assert wf_1.workflow_id == "corporations_pipeline"
+        assert wf_2.workflow_id == "sensors_pipeline"
+
+    def test_invalid_workflow_references_produce_meaningful_errors(self, tmp_path: Path) -> None:
+        _write_yaml(
+            tmp_path / "jobs" / "bad_ref.yml",
+            """
+job_id: bad_ref_job
+workflows:
+  - missing_workflow_pipeline
+""",
+        )
+        runner = AtlasRunner()
+        with pytest.raises(FileNotFoundError, match="missing_workflow_pipeline"):
+            runner.run(tmp_path, "jobs/bad_ref.yml")
+
+        _write_yaml(
+            tmp_path / "jobs" / "escape_batch.yml",
+            """
+job_id: escape_batch_job
+workflows:
+  - ../../outside_workflow
+""",
+        )
+        with pytest.raises(WorkspaceIsolationError):
+            runner.run(tmp_path, "jobs/escape_batch.yml")
+
+    def test_runner_calls_execute_job_once_and_never_calls_execute_workflow(
+        self, tmp_path: Path
+    ) -> None:
+        _write_yaml(
+            tmp_path / "workflows" / "corporations_pipeline.yml",
+            _valid_workflow_yaml().replace("unit_test_pipeline", "corporations_pipeline"),
+        )
+        _write_yaml(
+            tmp_path / "workflows" / "sensors_pipeline.yml",
+            _valid_workflow_yaml().replace("unit_test_pipeline", "sensors_pipeline"),
+        )
+        _write_yaml(
+            tmp_path / "jobs" / "morning_batch.yml",
+            """
+job_id: morning_batch
+name: Morning Batch
+workflows:
+  - corporations_pipeline
+  - sensors_pipeline
+parameters:
+  dataset_id: batch_override_dataset
+""",
+        )
+        csv_file = tmp_path / "drop" / "sample.csv"
+        csv_file.parent.mkdir(parents=True, exist_ok=True)
+        csv_file.write_text("id,name\n1,Alpha\n2,Beta\n", encoding="utf-8")
+
+        deps = build_default_dependencies()
+        real_orchestrator = create_orchestration_service(deps)
+
+        execute_job_calls: list[tuple[str, list[WorkflowDefinition], WorkspaceContext]] = []
+        orig_execute_job = real_orchestrator.execute_job
+        orig_execute_workflow = real_orchestrator.execute_workflow
+
+        in_execute_job = False
+
+        def spy_execute_job(
+            job_id: str,
+            workflows: list[WorkflowDefinition],
+            workspace: WorkspaceContext,
+        ) -> JobResult:
+            nonlocal in_execute_job
+            execute_job_calls.append((job_id, list(workflows), workspace))
+            in_execute_job = True
+            try:
+                return orig_execute_job(job_id=job_id, workflows=workflows, workspace=workspace)
+            finally:
+                in_execute_job = False
+
+        def guarded_execute_workflow(*args: Any, **kwargs: Any) -> Any:
+            if not in_execute_job:
+                raise AssertionError(
+                    "AtlasRunner must NOT call execute_workflow() directly; "
+                    "it must delegate via execute_job()."
+                )
+            return orig_execute_workflow(*args, **kwargs)
+
+        real_orchestrator.execute_job = spy_execute_job  # type: ignore[method-assign]
+        real_orchestrator.execute_workflow = guarded_execute_workflow  # type: ignore[method-assign]
+
+        runner = AtlasRunner(orchestration_service=real_orchestrator)
+        result = runner.run(tmp_path, "jobs/morning_batch.yml")
+
+        # 1. execute_job() called exactly once
+        assert len(execute_job_calls) == 1
+        called_job_id, called_workflows, called_workspace = execute_job_calls[0]
+        assert called_job_id == "morning_batch"
+        assert isinstance(called_workspace, WorkspaceContext)
+        assert called_workspace.root_path == tmp_path.resolve()
+        assert len(called_workflows) == 2
+        assert [w.workflow_id for w in called_workflows] == [
+            "corporations_pipeline",
+            "sensors_pipeline",
+        ]
+
+        # 2. Job-level parameters applied to both assembled WorkflowDefinitions
+        for wf_def in called_workflows:
+            ingest_step = wf_def.get_step("ingest")
+            assert ingest_step is not None
+            assert ingest_step.parameters["dataset_id"] == "batch_override_dataset"
+
+        # 3. JobResult returned with both workflow results
+        assert isinstance(result, JobResult)
+        assert result.job_id == "morning_batch"
+        assert result.status == ExecutionStatus.SUCCEEDED
+        assert len(result.workflow_results) == 2
+        assert result.workflow_results[0].workflow_id == "corporations_pipeline"
+        assert result.workflow_results[1].workflow_id == "sensors_pipeline"

@@ -472,13 +472,23 @@ def load_job_definition(
         job_def = JobDefinition.model_validate(raw_job)
     except ValidationError as exc:
         err_field = _format_pydantic_loc(exc.errors()[0].get("loc", ())) if exc.errors() else "root"
+        if err_field == "root":
+            msg = str(exc)
+            if "workflows" in msg and "workflow_ref" not in raw_job:
+                err_field = "workflows"
+            elif "workflow_ref" in msg:
+                err_field = "workflow_ref"
         _annotate_exception(exc, config_file=resolved_job_path, field=err_field)
         raise
     except Exception as exc:
         err_field = (
             "job_id"
             if "job_id" in str(exc)
-            else ("workflow_ref" if "workflow_ref" in str(exc) else "root")
+            else (
+                "workflows"
+                if "workflows" in str(exc)
+                else ("workflow_ref" if "workflow_ref" in str(exc) else "root")
+            )
         )
         raise RunnerConfigurationError(
             f"Invalid job configuration in '{resolved_job_path}' (field '{err_field}'): {exc}",
@@ -488,19 +498,105 @@ def load_job_definition(
     return job_def, resolved_job_path
 
 
+def resolve_workflow_reference(
+    workspace: str | Path,
+    workflow_ref: str | Path,
+    *,
+    config_file: str | Path | None = None,
+    field: str = "workflow_ref",
+) -> Path:
+    """Resolve a workflow reference (logical ID or relative YAML path) inside ``workspace``.
+
+    Supports both:
+    - Explicit workspace-relative paths (e.g. ``workflows/corporations-pipeline.yml``)
+    - Logical workflow names (e.g. ``corporations_pipeline`` resolving to
+      ``workflows/corporations_pipeline.yml`` or ``workflows/corporations-pipeline.yml``)
+
+    Raises :class:`WorkspaceIsolationError` if the reference attempts to escape ``workspace``.
+    """
+    ref_str = str(workflow_ref).strip() if workflow_ref is not None else ""
+    if not ref_str:
+        raise RunnerConfigurationError(
+            "Workflow reference must not be empty.",
+            config_file=str(config_file) if config_file is not None else None,
+            field=field,
+        )
+
+    # Always audit the raw reference against the workspace boundary first.
+    direct_resolved = resolve_workspace_path(
+        workspace,
+        ref_str,
+        config_file=config_file,
+        field=field,
+    )
+
+    has_path_sep = "/" in ref_str or "\\" in ref_str
+    has_yaml_ext = ref_str.lower().endswith((".yml", ".yaml"))
+
+    if has_path_sep or has_yaml_ext or Path(ref_str).is_absolute():
+        if direct_resolved.exists() and direct_resolved.is_file():
+            return direct_resolved
+        if not has_path_sep and has_yaml_ext:
+            in_workflows = resolve_workspace_path(
+                workspace,
+                f"workflows/{ref_str}",
+                config_file=config_file,
+                field=field,
+            )
+            if in_workflows.exists() and in_workflows.is_file():
+                return in_workflows
+        return direct_resolved
+
+    # Bare workflow identifier (e.g. "corporations_pipeline" or "sensors_pipeline")
+    stem_variants = [ref_str]
+    if "_" in ref_str:
+        stem_variants.append(ref_str.replace("_", "-"))
+    if "-" in ref_str:
+        stem_variants.append(ref_str.replace("-", "_"))
+
+    candidates: list[Path] = []
+    for stem in stem_variants:
+        for ext in (".yml", ".yaml"):
+            candidates.append(
+                resolve_workspace_path(
+                    workspace,
+                    f"workflows/{stem}{ext}",
+                    config_file=config_file,
+                    field=field,
+                )
+            )
+    for stem in stem_variants:
+        for ext in (".yml", ".yaml"):
+            candidates.append(
+                resolve_workspace_path(
+                    workspace,
+                    f"{stem}{ext}",
+                    config_file=config_file,
+                    field=field,
+                )
+            )
+
+    for candidate in candidates:
+        if candidate.exists() and candidate.is_file():
+            return candidate
+
+    return candidates[0]
+
+
 def load_workflow_definition(
     workspace: str | Path,
     workflow_ref: str | Path,
     *,
     job_parameters: Mapping[str, Any] | None = None,
     job_file: str | Path | None = None,
+    field: str = "workflow_ref",
 ) -> tuple[WorkflowDefinition, dict[str, Any], Path]:
     """Load, merge parameters, audit paths, and construct a :class:`WorkflowDefinition`."""
-    resolved_wf_path = resolve_workspace_path(
+    resolved_wf_path = resolve_workflow_reference(
         workspace,
         workflow_ref,
         config_file=job_file,
-        field="workflow_ref",
+        field=field,
     )
     raw_workflow = load_yaml_file(resolved_wf_path)
     prepared_data, merged_params = apply_job_parameters_to_workflow_data(
@@ -543,6 +639,7 @@ __all__ = [
     "load_yaml_file",
     "merge_parameters",
     "resolve_step_paths",
+    "resolve_workflow_reference",
     "resolve_workspace_path",
     "validate_workflow_dag",
 ]

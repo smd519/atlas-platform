@@ -1,4 +1,4 @@
-"""Stateless runner coordinating validation, dependency construction, and orchestration."""
+"""Stateless runner coordinating validation, workflow assembly, and orchestration handoff."""
 
 from __future__ import annotations
 
@@ -7,16 +7,18 @@ from pathlib import Path
 
 from atlas_core import ExecutionStatus
 from atlas_orchestration import (
-    ExecutionContext,
+    JobResult,
     OrchestrationDependencies,
     OrchestrationService,
-    WorkflowResult,
+    WorkflowDefinition,
     WorkflowValidator,
+    WorkspaceContext,
 )
 
 from atlas_runner.config import (
     load_job_definition,
     load_workflow_definition,
+    resolve_workspace_path,
     validate_workflow_dag,
 )
 from atlas_runner.dependencies import (
@@ -28,7 +30,7 @@ from atlas_runner.models import ValidationReport
 
 
 class AtlasRunner:
-    """Stateless YAML workflow runner that constructs a fresh dependency graph per execution."""
+    """Stateless YAML job runner that assembles workflows and hands off to orchestration."""
 
     def __init__(
         self,
@@ -70,36 +72,54 @@ class AtlasRunner:
         *,
         validator: WorkflowValidator | None = None,
     ) -> ValidationReport:
-        """Validate Job YAML, Workflow YAML, parameter merge, path isolation, and DAG structure.
+        """Validate Job YAML, Workflow YAMLs, parameter merge, path isolation, and DAG structure.
 
         Does NOT instantiate storage, connectors, ingestion, processing, quality, or
         orchestration execution services.
         """
-        job_def, resolved_job_path = load_job_definition(workspace, job_path)
+        workspace_root = resolve_workspace_path(workspace, ".", field="workspace")
+        job_def, resolved_job_path = load_job_definition(workspace_root, job_path)
         self._last_job_id = job_def.job_id
 
-        workflow_def, _, resolved_wf_path = load_workflow_definition(
-            workspace,
-            job_def.workflow_ref,
-            job_parameters=job_def.parameters,
-            job_file=resolved_job_path,
-        )
+        workflows: list[WorkflowDefinition] = []
+        workflow_files: list[Path] = []
+        topological_orders: dict[str, tuple[str, ...]] = {}
+        all_valid = True
 
-        dag_result = validate_workflow_dag(
-            workflow_def,
-            config_file=resolved_wf_path,
-            validator=validator,
-        )
+        for wf_ref in job_def.workflows:
+            workflow_def, _, resolved_wf_path = load_workflow_definition(
+                workspace_root,
+                wf_ref,
+                job_parameters=job_def.parameters,
+                job_file=resolved_job_path,
+                field="workflow_ref",
+            )
+            dag_result = validate_workflow_dag(
+                workflow_def,
+                config_file=resolved_wf_path,
+                validator=validator,
+            )
+            all_valid = all_valid and dag_result.is_valid
+            workflows.append(workflow_def)
+            workflow_files.append(resolved_wf_path)
+            topological_orders[workflow_def.workflow_id] = dag_result.topological_order
+
+        first_wf = workflows[0]
+        first_file = workflow_files[0]
+        first_order = topological_orders[first_wf.workflow_id]
 
         return ValidationReport(
-            is_valid=dag_result.is_valid,
+            is_valid=all_valid,
             job_id=job_def.job_id,
             job_file=resolved_job_path,
-            workflow_id=workflow_def.workflow_id,
-            workflow_version=workflow_def.version,
-            workflow_file=resolved_wf_path,
-            topological_order=dag_result.topological_order,
-            workflow=workflow_def,
+            workflow_id=first_wf.workflow_id,
+            workflow_version=first_wf.version,
+            workflow_file=first_file,
+            topological_order=first_order,
+            workflow=first_wf,
+            workflows=workflows,
+            workflow_files=workflow_files,
+            topological_orders=topological_orders,
         )
 
     def _build_execution_runtime(
@@ -124,42 +144,39 @@ class AtlasRunner:
         job_path: str | Path,
         *,
         raise_on_error: bool = False,
-    ) -> WorkflowResult:
-        """Validate configurations, construct a fresh dependency graph, and execute the workflow."""
-        job_def, resolved_job_path = load_job_definition(workspace, job_path)
+    ) -> JobResult:
+        """Assemble Job workflows, build a fresh dependency graph, and hand off to orchestration."""
+        workspace_root = resolve_workspace_path(workspace, ".", field="workspace")
+        workspace_context = WorkspaceContext(root_path=workspace_root)
+
+        job_def, resolved_job_path = load_job_definition(workspace_context.root_path, job_path)
         self._last_job_id = job_def.job_id
 
-        workflow_def, merged_params, resolved_wf_path = load_workflow_definition(
-            workspace,
-            job_def.workflow_ref,
-            job_parameters=job_def.parameters,
-            job_file=resolved_job_path,
-        )
-        validate_workflow_dag(workflow_def, config_file=resolved_wf_path)
+        workflows: list[WorkflowDefinition] = []
+        for wf_ref in job_def.workflows:
+            workflow_def, _, resolved_wf_path = load_workflow_definition(
+                workspace_context.root_path,
+                wf_ref,
+                job_parameters=job_def.parameters,
+                job_file=resolved_job_path,
+                field="workflow_ref",
+            )
+            validate_workflow_dag(workflow_def, config_file=resolved_wf_path)
+            workflows.append(workflow_def)
 
         deps, orchestrator = self._build_execution_runtime()
         self._last_dependencies = deps
         self._last_orchestrator = orchestrator
 
-        orchestrator.register_workflow(workflow_def)
-
-        context = ExecutionContext(
-            workflow_id=workflow_def.workflow_id,
-            workflow_version=workflow_def.version,
-            execution_metadata={"job_id": job_def.job_id},
-        )
-
-        result = orchestrator.execute_workflow(
-            workflow_def.workflow_id,
-            version=workflow_def.version,
-            parameters=merged_params,
-            context=context,
+        result = orchestrator.execute_job(
+            job_id=job_def.job_id,
+            workflows=workflows,
+            workspace=workspace_context,
         )
 
         if raise_on_error and result.status != ExecutionStatus.SUCCEEDED:
             raise RunnerExecutionError(
-                result.message
-                or f"Job '{job_def.job_id}' (workflow '{workflow_def.workflow_id}') failed."
+                result.message or f"Job '{job_def.job_id}' execution failed."
             )
 
         return result

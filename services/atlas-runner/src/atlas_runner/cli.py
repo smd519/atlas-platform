@@ -7,7 +7,7 @@ import sys
 from collections.abc import Sequence
 
 from atlas_core import ExecutionStatus
-from atlas_orchestration import WorkflowResult
+from atlas_orchestration import JobResult, WorkflowResult
 
 from atlas_runner.config import extract_error_context
 from atlas_runner.models import ValidationReport
@@ -18,7 +18,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
     """Create the CLI argument parser for ``atlas-runner``."""
     parser = argparse.ArgumentParser(
         prog="atlas-runner",
-        description="Execute or validate a YAML-defined Atlas customer job and workflow.",
+        description="Execute or validate a YAML-defined Atlas customer job and workflows.",
     )
     parser.add_argument(
         "--workspace",
@@ -40,27 +40,67 @@ def build_argument_parser() -> argparse.ArgumentParser:
 
 
 def format_execution_report(
-    result: WorkflowResult,
+    result: JobResult | WorkflowResult,
     *,
     job_id: str | None = None,
 ) -> str:
-    """Format the standardized execution report matching the exact required structure."""
+    """Format the standardized execution report for single-workflow or multi-workflow jobs."""
     resolved_job_id = job_id or getattr(result, "job_id", None) or "unknown"
     overall_status = str(
         result.status.value if hasattr(result.status, "value") else result.status
     ).upper()
     duration_val = float(result.duration) if result.duration is not None else 0.0
 
+    if isinstance(result, JobResult) and len(result.workflow_results) > 1:
+        lines = [
+            "========== ATLAS EXECUTION ==========",
+            f"Job: {resolved_job_id}",
+            f"Execution: {result.execution_id}",
+            f"Status: {overall_status}",
+        ]
+        for wf_res in result.workflow_results:
+            wf_status = str(
+                wf_res.status.value if hasattr(wf_res.status, "value") else wf_res.status
+            ).upper()
+            lines.extend(
+                [
+                    "",
+                    f"Workflow: {wf_res.workflow_id}",
+                    f"Execution: {wf_res.execution_id}",
+                    f"Workflow Status: {wf_status}",
+                    "Steps:",
+                ]
+            )
+            for step in wf_res.step_results:
+                step_status = str(
+                    step.status.value if hasattr(step.status, "value") else step.status
+                ).upper()
+                lines.append(f"  {step.step_id}:  {step_status}")
+        lines.extend(
+            [
+                "",
+                f"Duration: {duration_val:.1f} seconds",
+                "====================================",
+            ]
+        )
+        return "\n".join(lines)
+
+    # Single-workflow JobResult or direct WorkflowResult
+    wf_target: WorkflowResult | JobResult = (
+        result.workflow_results[0]
+        if isinstance(result, JobResult) and len(result.workflow_results) == 1
+        else result
+    )
     lines = [
         "========== ATLAS EXECUTION ==========",
         f"Job: {resolved_job_id}",
-        f"Workflow: {result.workflow_id}",
-        f"Execution: {result.execution_id}",
+        f"Workflow: {wf_target.workflow_id}",
+        f"Execution: {wf_target.execution_id}",
         f"Status: {overall_status}",
         "",
         "Steps:",
     ]
-    for step in result.step_results:
+    for step in wf_target.step_results:
         step_status = str(
             step.status.value if hasattr(step.status, "value") else step.status
         ).upper()
@@ -77,6 +117,27 @@ def format_execution_report(
 
 def format_validation_report(report: ValidationReport) -> str:
     """Format a dry-run validation report for ``--validate-only`` mode."""
+    if len(report.workflows) > 1:
+        lines = [
+            "========== ATLAS VALIDATION ==========",
+            f"Job: {report.job_id}",
+            f"Job File: {report.job_file}",
+            "Status: VALID",
+        ]
+        for wf, wf_file in zip(report.workflows, report.workflow_files, strict=False):
+            lines.extend(
+                [
+                    "",
+                    f"Workflow: {wf.workflow_id} (v{wf.version})",
+                    f"Workflow File: {wf_file}",
+                    "Steps:",
+                ]
+            )
+            for step_id in report.topological_orders.get(wf.workflow_id, ()):
+                lines.append(f"  {step_id}:  VALID")
+        lines.append("======================================")
+        return "\n".join(lines)
+
     lines = [
         "========== ATLAS VALIDATION ==========",
         f"Job: {report.job_id}",
