@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import os
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -16,11 +17,67 @@ from atlas_orchestration import (
     WorkflowDefinition,
     WorkflowValidationResult,
     WorkflowValidator,
+    WorkspaceContext,
 )
 from pydantic import ValidationError
 
 from atlas_runner.exceptions import RunnerConfigurationError, WorkspaceIsolationError
 from atlas_runner.models import JobDefinition
+
+
+def resolve_workspace(
+    workspace: str | Path,
+    *,
+    config_file: str | Path | None = None,
+    field: str = "workspace",
+) -> WorkspaceContext:
+    """Resolve ``workspace`` (absolute path or logical ID) into a :class:`WorkspaceContext`.
+
+    Resolution Rules
+    ----------------
+    - If ``workspace`` is an absolute path, use it directly.
+    - If ``workspace`` is a logical ID (non-absolute path, e.g. ``customer_001``),
+      require the ``ATLAS_WORKSPACE`` environment variable and resolve to
+      ``$ATLAS_WORKSPACE/<logical_workspace_id>``.
+    """
+    cfg_str = str(config_file) if config_file is not None else None
+    ws_str = str(workspace).strip() if workspace is not None else ""
+    if not ws_str:
+        raise RunnerConfigurationError(
+            "Workspace path must not be empty.",
+            config_file=cfg_str,
+            field=field,
+        )
+
+    ws_path = Path(ws_str)
+    if ws_path.is_absolute():
+        resolved_root = ws_path.resolve()
+        logical_id = resolved_root.name or str(resolved_root)
+        return WorkspaceContext(workspace_id=logical_id, root_path=resolved_root)
+
+    atlas_ws_env = os.environ.get("ATLAS_WORKSPACE", "").strip()
+    if not atlas_ws_env:
+        raise RunnerConfigurationError(
+            f"Cannot resolve logical workspace '{ws_str}': environment variable "
+            "'ATLAS_WORKSPACE' must be set when using a logical workspace ID "
+            "(or provide an absolute --workspace path).",
+            config_file=cfg_str,
+            field=field,
+        )
+
+    base_root = Path(atlas_ws_env).expanduser().resolve()
+    candidate = (base_root / ws_path).resolve()
+    if not candidate.is_relative_to(base_root) or candidate == base_root:
+        raise WorkspaceIsolationError(
+            f"Workspace isolation violation: logical workspace '{ws_str}' resolves to "
+            f"'{candidate}', which escapes ATLAS_WORKSPACE boundary '{base_root}'.",
+            config_file=cfg_str,
+            field=field,
+            offending_path=ws_str,
+            workspace=str(base_root),
+        )
+
+    return WorkspaceContext(workspace_id=ws_str, root_path=candidate)
 
 
 def resolve_workspace_path(
@@ -35,19 +92,18 @@ def resolve_workspace_path(
     Raises
     ------
     RunnerConfigurationError
-        If ``workspace`` or ``target`` is empty.
+        If ``workspace`` or ``target`` is empty, or ``ATLAS_WORKSPACE`` is unset
+        for a logical workspace ID.
     WorkspaceIsolationError
         If the resolved path escapes ``workspace`` via relative traversal
         (e.g. ``../../etc/shadow``) or an external absolute path.
     """
     cfg_str = str(config_file) if config_file is not None else None
-    ws_str = str(workspace).strip() if workspace is not None else ""
-    if not ws_str:
-        raise RunnerConfigurationError(
-            "Workspace path must not be empty.",
-            config_file=cfg_str,
-            field=field or "workspace",
-        )
+    ws_ctx = resolve_workspace(
+        workspace,
+        config_file=config_file,
+        field=field or "workspace",
+    )
 
     target_str = str(target).strip() if target is not None else ""
     if not target_str:
@@ -57,7 +113,7 @@ def resolve_workspace_path(
             field=field or "path",
         )
 
-    workspace_root = Path(ws_str).resolve()
+    workspace_root = ws_ctx.root_path
     target_path = Path(target_str)
     if target_path.is_absolute():
         resolved = target_path.resolve()
@@ -457,12 +513,57 @@ def extract_error_context(
     return resolved_file, resolved_field, detail
 
 
+def resolve_job_reference(
+    workspace: str | Path,
+    job_path: str | Path,
+    *,
+    config_file: str | Path | None = None,
+    field: str = "job_path",
+) -> Path:
+    """Resolve a job reference (logical ID or relative YAML path) inside ``workspace``.
+
+    If ``job_path`` does not end in ``.yml`` or ``.yaml``, assumes the managed
+    workspace contract and resolves to ``{workspace_path}/jobs/{job_id}.yml``.
+    """
+    ws_ctx = resolve_workspace(workspace, config_file=config_file, field="workspace")
+    workspace_root = ws_ctx.root_path
+
+    job_str = str(job_path).strip() if job_path is not None else ""
+    if not job_str:
+        raise RunnerConfigurationError(
+            "Job path or logical ID must not be empty.",
+            config_file=str(config_file) if config_file is not None else None,
+            field=field,
+        )
+
+    # Always audit raw job_str against workspace_root first to catch traversal attempts.
+    direct_resolved = resolve_workspace_path(
+        workspace_root,
+        job_str,
+        config_file=config_file,
+        field=field,
+    )
+
+    if job_str.lower().endswith((".yml", ".yaml")):
+        return direct_resolved
+
+    rel_target = (
+        f"{job_str}.yml" if job_str.startswith(("jobs/", "jobs\\")) else f"jobs/{job_str}.yml"
+    )
+    return resolve_workspace_path(
+        workspace_root,
+        rel_target,
+        config_file=config_file,
+        field=field,
+    )
+
+
 def load_job_definition(
     workspace: str | Path,
     job_path: str | Path,
 ) -> tuple[JobDefinition, Path]:
     """Load and validate a :class:`JobDefinition` from ``job_path`` within ``workspace``."""
-    resolved_job_path = resolve_workspace_path(
+    resolved_job_path = resolve_job_reference(
         workspace,
         job_path,
         field="job_path",
@@ -638,8 +739,10 @@ __all__ = [
     "load_workflow_definition",
     "load_yaml_file",
     "merge_parameters",
+    "resolve_job_reference",
     "resolve_step_paths",
     "resolve_workflow_reference",
+    "resolve_workspace",
     "resolve_workspace_path",
     "validate_workflow_dag",
 ]

@@ -12,13 +12,12 @@ from atlas_orchestration import (
     OrchestrationService,
     WorkflowDefinition,
     WorkflowValidator,
-    WorkspaceContext,
 )
 
 from atlas_runner.config import (
     load_job_definition,
     load_workflow_definition,
-    resolve_workspace_path,
+    resolve_workspace,
     validate_workflow_dag,
 )
 from atlas_runner.dependencies import (
@@ -77,7 +76,8 @@ class AtlasRunner:
         Does NOT instantiate storage, connectors, ingestion, processing, quality, or
         orchestration execution services.
         """
-        workspace_root = resolve_workspace_path(workspace, ".", field="workspace")
+        workspace_context = resolve_workspace(workspace, field="workspace")
+        workspace_root = workspace_context.root_path
         job_def, resolved_job_path = load_job_definition(workspace_root, job_path)
         self._last_job_id = job_def.job_id
 
@@ -146,8 +146,7 @@ class AtlasRunner:
         raise_on_error: bool = False,
     ) -> JobResult:
         """Assemble Job workflows, build a fresh dependency graph, and hand off to orchestration."""
-        workspace_root = resolve_workspace_path(workspace, ".", field="workspace")
-        workspace_context = WorkspaceContext(root_path=workspace_root)
+        workspace_context = resolve_workspace(workspace, field="workspace")
 
         job_def, resolved_job_path = load_job_definition(workspace_context.root_path, job_path)
         self._last_job_id = job_def.job_id

@@ -23,12 +23,12 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--workspace",
         required=True,
-        help="Path to the customer workspace root directory.",
+        help="Logical workspace ID (resolved via ATLAS_WORKSPACE) or absolute workspace path.",
     )
     parser.add_argument(
         "--job",
         required=True,
-        help="Path to the job YAML file (relative to workspace or absolute within workspace).",
+        help="Logical job ID (e.g. morning_batch) or relative path to the job YAML file.",
     )
     parser.add_argument(
         "--validate-only",

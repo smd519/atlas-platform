@@ -27,7 +27,9 @@ from atlas_runner import (
     load_workflow_definition,
     main,
     merge_parameters,
+    resolve_job_reference,
     resolve_workflow_reference,
+    resolve_workspace,
     resolve_workspace_path,
 )
 from pydantic import ValidationError
@@ -759,3 +761,120 @@ parameters:
         assert len(result.workflow_results) == 2
         assert result.workflow_results[0].workflow_id == "corporations_pipeline"
         assert result.workflow_results[1].workflow_id == "sensors_pipeline"
+
+
+class TestManagedWorkspaceAndLogicalIdResolution:
+    """Managed Workspace (ATLAS_WORKSPACE) and logical Job/Workflow ID resolution tests."""
+
+    def test_workspace_resolution_with_atlas_workspace_env_var(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("ATLAS_WORKSPACE", str(tmp_path))
+        customer_dir = tmp_path / "customer_001"
+        customer_dir.mkdir(parents=True, exist_ok=True)
+
+        ws_ctx = resolve_workspace("customer_001")
+        assert ws_ctx.workspace_id == "customer_001"
+        assert ws_ctx.workspace_path == customer_dir.resolve()
+        assert ws_ctx.root_path == customer_dir.resolve()
+
+        # Absolute path still works directly and preserves backward compatibility
+        abs_other = tmp_path / "explicit_abs_ws"
+        abs_ctx = resolve_workspace(abs_other)
+        assert abs_ctx.workspace_id == "explicit_abs_ws"
+        assert abs_ctx.workspace_path == abs_other.resolve()
+
+    def test_logical_workspace_without_atlas_workspace_raises_clear_error(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.delenv("ATLAS_WORKSPACE", raising=False)
+        with pytest.raises(RunnerConfigurationError, match="ATLAS_WORKSPACE") as exc_info:
+            resolve_workspace("customer_001")
+        assert exc_info.value.field == "workspace"
+
+    def test_logical_workspace_traversal_outside_atlas_workspace_raises_isolation_error(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("ATLAS_WORKSPACE", str(tmp_path / "managed_root"))
+        with pytest.raises(WorkspaceIsolationError):
+            resolve_workspace("../../outside_root")
+
+    def test_logical_job_id_maps_to_jobs_subdirectory_with_yml_extension(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("ATLAS_WORKSPACE", str(tmp_path))
+        ws_dir = tmp_path / "customer_001"
+        expected_job_file = _write_yaml(
+            ws_dir / "jobs" / "morning_batch.yml",
+            """
+job_id: morning_batch
+name: Morning Batch
+workflows:
+  - corporations_pipeline
+""",
+        )
+
+        # 1. Direct resolve_job_reference with logical workspace and logical job ID
+        resolved_path = resolve_job_reference("customer_001", "morning_batch")
+        assert resolved_path == expected_job_file.resolve()
+
+        # 2. load_job_definition with logical workspace ID and logical job ID
+        job_def, loaded_path = load_job_definition("customer_001", "morning_batch")
+        assert loaded_path == expected_job_file.resolve()
+        assert job_def.job_id == "morning_batch"
+        assert job_def.workflows == ["corporations_pipeline"]
+
+    def test_logical_workflow_id_maps_to_workflows_subdirectory_with_yml_extension(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("ATLAS_WORKSPACE", str(tmp_path))
+        ws_dir = tmp_path / "customer_001"
+        expected_wf_file = _write_yaml(
+            ws_dir / "workflows" / "corporations_pipeline.yml",
+            _valid_workflow_yaml().replace("unit_test_pipeline", "corporations_pipeline"),
+        )
+
+        resolved_wf = resolve_workflow_reference("customer_001", "corporations_pipeline")
+        assert resolved_wf == expected_wf_file.resolve()
+
+    def test_cli_execution_with_logical_workspace_and_logical_job_id(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        monkeypatch.setenv("ATLAS_WORKSPACE", str(tmp_path))
+        ws_dir = tmp_path / "customer_001"
+        _write_yaml(
+            ws_dir / "jobs" / "morning_batch.yml",
+            """
+job_id: morning_batch
+name: Morning Batch
+workflows:
+  - corporations_pipeline
+""",
+        )
+        _write_yaml(
+            ws_dir / "workflows" / "corporations_pipeline.yml",
+            _valid_workflow_yaml().replace("unit_test_pipeline", "corporations_pipeline"),
+        )
+        csv_file = ws_dir / "drop" / "sample.csv"
+        csv_file.parent.mkdir(parents=True, exist_ok=True)
+        csv_file.write_text("id,name\n1,Alpha\n2,Beta\n", encoding="utf-8")
+
+        exit_code = main(["--workspace", "customer_001", "--job", "morning_batch"])
+        assert exit_code == 0
+
+        out = capsys.readouterr().out
+        assert "Job: morning_batch" in out
+        assert "Workflow: corporations_pipeline" in out
+        assert "Status: SUCCEEDED" in out

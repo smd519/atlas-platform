@@ -16,8 +16,10 @@ from atlas_runner.config import (
     load_workflow_definition,
     load_yaml_file,
     merge_parameters,
+    resolve_job_reference,
     resolve_step_paths,
     resolve_workflow_reference,
+    resolve_workspace,
     resolve_workspace_path,
     validate_workflow_dag,
 )
@@ -61,8 +63,10 @@ __all__ = [
     "load_yaml_file",
     "main",
     "merge_parameters",
+    "resolve_job_reference",
     "resolve_step_paths",
     "resolve_workflow_reference",
+    "resolve_workspace",
     "resolve_workspace_path",
     "validate_workflow_dag",
 ]
