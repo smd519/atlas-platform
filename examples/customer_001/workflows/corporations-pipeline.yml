@@ -1,0 +1,55 @@
+workflow_id: corporations_pipeline
+name: Corporations Active CBCA Pipeline
+description: End-to-end ingestion, transformation, and quality assessment for active CBCA corporations.
+version: 1
+steps:
+  - step_id: ingest
+    module_target: atlas-ingestion
+    action: ingest
+    parameters:
+      dataset_id: corporations_default
+      source_format: csv
+      source:
+        source_id: corporations_cbca_csv
+        source_name: Corporations Active CBCA CSV
+        source_type: local_file
+        config:
+          path: drop/corporations-active-cbca-en.csv
+      destination:
+        layer: bronze
+        path: data/bronze/corporations-active-cbca-en.parquet
+        format: parquet
+
+  - step_id: process
+    module_target: atlas-processing
+    action: transform
+    depends_on:
+      - ingest
+    parameters:
+      dataset_id: "${steps.ingest.dataset_id}"
+      source: "${steps.ingest.destination}"
+      destination:
+        layer: silver
+        path: data/silver/corporations-active-cbca-en.parquet
+        format: parquet
+      transformations:
+        - transformation_id: filter
+          name: require_corporation_number
+          params:
+            column: "Corporation number"
+            operator: not_null
+
+  - step_id: quality
+    module_target: atlas-quality
+    action: assess
+    depends_on:
+      - process
+    parameters:
+      dataset_id: "${steps.process.dataset_id}"
+      storage_location: "${steps.process.destination}"
+      rules:
+        - rule_id: completeness.not_null
+          name: corporation_number_not_null
+          params:
+            column: "Corporation number"
+
