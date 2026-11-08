@@ -114,4 +114,3 @@ class JobResult(Result):
 
 
 __all__ = ["JobResult"]
-

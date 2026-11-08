@@ -93,12 +93,18 @@ class TestJobResultAndWorkspaceContextModels:
 
     def test_workspace_context_normalizes_root_path(self, tmp_path: Path) -> None:
         ws = WorkspaceContext(tmp_path)
+        assert ws.workspace_id == tmp_path.resolve().name
         assert ws.root_path == tmp_path.resolve()
         assert ws.workspace_path == tmp_path.resolve()
         assert ws.path == tmp_path.resolve()
 
-        ws_kw = WorkspaceContext(workspace_path=str(tmp_path))
+        ws_kw = WorkspaceContext(
+            workspace_id="customer_001",
+            workspace_path=str(tmp_path),
+        )
+        assert ws_kw.workspace_id == "customer_001"
         assert ws_kw.root_path == tmp_path.resolve()
+        assert ws_kw.workspace_path == tmp_path.resolve()
 
     def test_workspace_context_rejects_empty_path(self) -> None:
         with pytest.raises(InvalidWorkflowStateError):
