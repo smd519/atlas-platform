@@ -1,0 +1,28 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "atlas-runner"
+version = "0.1.0"
+description = "Generic YAML-driven workflow execution entry point for Atlas Platform."
+readme = "README.md"
+requires-python = ">=3.12,<3.14"
+dependencies = [
+    "atlas-core",
+    "atlas-connectors",
+    "atlas-storage",
+    "atlas-ingestion",
+    "atlas-processing",
+    "atlas-quality",
+    "atlas-orchestration",
+    "pydantic>=2.14.2",
+    "pyyaml>=6.0.3",
+]
+
+[project.scripts]
+atlas-runner = "atlas_runner.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/atlas_runner"]
+

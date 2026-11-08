@@ -6,6 +6,7 @@ description = "Reusable platform for data ingestion, processing, governance, and
 requires-python = ">=3.12,<3.14"
 dependencies = [
     "alembic>=1.20.1",
+    "atlas-runner",
     "delta-spark>=4.1.0",
     "duckdb>=2.0.0",
     "httpx>=0.28.1",
@@ -29,6 +30,20 @@ members = [
     "modules/*",
     "services/*",
 ]
+
+[tool.uv.sources]
+atlas-api = { workspace = true }
+atlas-connectors = { workspace = true }
+atlas-core = { workspace = true }
+atlas-ingestion = { workspace = true }
+atlas-metadata = { workspace = true }
+atlas-orchestration = { workspace = true }
+atlas-processing = { workspace = true }
+atlas-quality = { workspace = true }
+atlas-runner = { workspace = true }
+atlas-scheduler = { workspace = true }
+atlas-spatial = { workspace = true }
+atlas-storage = { workspace = true }
 
 [dependency-groups]
 dev = [
