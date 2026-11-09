@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from atlas_connectors import ConnectorFactory, ConnectorRegistry
 from atlas_core import StorageProvider
 from atlas_storage import StorageManager, StorageRegistry
@@ -36,6 +38,7 @@ class IngestionService:
         storage_manager: StorageManager | None = None,
         storage_provider: StorageProvider | None = None,
         storage_registry: StorageRegistry | None = None,
+        workspace: str | Path | None = None,
     ) -> None:
         if pipeline is not None:
             self._pipeline = pipeline
@@ -43,6 +46,7 @@ class IngestionService:
             resolved_extractor = extractor or Extractor(
                 connector_factory=connector_factory,
                 connector_registry=connector_registry,
+                workspace=workspace,
             )
             resolved_loader = loader or Loader(
                 storage_manager=storage_manager,
@@ -54,6 +58,7 @@ class IngestionService:
                 extractor=resolved_extractor,
                 loader=resolved_loader,
                 tracker=resolved_tracker,
+                workspace=workspace,
             )
 
     def ingest(

@@ -129,3 +129,28 @@ def test_contracts_are_abstract() -> None:
     ):
         with pytest.raises(TypeError):
             contract_cls()  # type: ignore[abstract]
+
+
+def test_connector_contract_supports_optional_destination(tmp_path: Path) -> None:
+    class _DummyConnector(Connector):
+        @property
+        def source_name(self) -> str:
+            return "dummy"
+
+        def validate_connection(self) -> bool:
+            return True
+
+        def extract(
+            self,
+            *,
+            destination: Path | None = None,
+            **kwargs: object,
+        ) -> Path | dict[str, object]:
+            if destination is not None:
+                return destination
+            return {"ok": True, "extra": kwargs}
+
+    conn = _DummyConnector()
+    assert conn.extract() == {"ok": True, "extra": {}}
+    dest = tmp_path / "out.csv"
+    assert conn.extract(destination=dest) == dest

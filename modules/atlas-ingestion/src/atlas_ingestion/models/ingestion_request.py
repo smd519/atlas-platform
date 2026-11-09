@@ -20,6 +20,7 @@ from atlas_ingestion.exceptions import InvalidIngestionRequestError
 
 SUPPORTED_FORMATS: frozenset[str] = frozenset({"csv", "json", "parquet", "raw", "bytes"})
 ALLOWED_RAW_LAYERS: frozenset[str] = frozenset({BRONZE, "raw"})
+SUPPORTED_RESPONSE_MODES: frozenset[str] = frozenset({"file", "json"})
 
 
 def _require_non_blank(value: str, field_name: str) -> str:
@@ -40,6 +41,7 @@ class ExecutionConfig(BaseModel):
     partition_by_date: bool = False
     overwrite: bool = True
     raise_on_error: bool = False
+    workspace: str | None = None
     extract_kwargs: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -79,11 +81,48 @@ class IngestionRequest(BaseModel):
         source_id = _require_non_blank(self.source.source_id, "source.source_id")
         source_name = _require_non_blank(self.source.source_name, "source.source_name")
         source_type = _require_non_blank(self.source.source_type, "source.source_type")
+        source_cfg_dict = dict(self.source.config)
+
+        if "response_mode" in source_cfg_dict and source_cfg_dict["response_mode"] is not None:
+            raw_mode = _require_non_blank(
+                str(source_cfg_dict["response_mode"]),
+                "source.config.response_mode",
+            ).lower()
+            if raw_mode not in SUPPORTED_RESPONSE_MODES:
+                bad_mode = source_cfg_dict["response_mode"]
+                raise InvalidIngestionRequestError(
+                    f"Unsupported source.config.response_mode '{bad_mode}'. "
+                    f"Supported modes: {sorted(SUPPORTED_RESPONSE_MODES)}",
+                    request_id=self.request_id,
+                )
+            source_cfg_dict["response_mode"] = raw_mode
+
+        if (
+            "download_filename" in source_cfg_dict
+            and source_cfg_dict["download_filename"] is not None
+        ):
+            raw_filename = _require_non_blank(
+                str(source_cfg_dict["download_filename"]),
+                "source.config.download_filename",
+            )
+            if (
+                "/" in raw_filename
+                or "\\" in raw_filename
+                or raw_filename in {".", ".."}
+                or ".." in raw_filename
+            ):
+                raise InvalidIngestionRequestError(
+                    f"Invalid source.config.download_filename '{raw_filename}': "
+                    "must be a simple filename without path traversal segments.",
+                    request_id=self.request_id,
+                )
+            source_cfg_dict["download_filename"] = raw_filename
+
         self.source = SourceConfig(
             source_id=SourceId(source_id),
             source_name=source_name,
             source_type=source_type,
-            config=dict(self.source.config),
+            config=source_cfg_dict,
         )
 
         normalized_source_format = _require_non_blank(self.source_format, "source_format").lower()

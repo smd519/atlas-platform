@@ -157,6 +157,62 @@ def test_ingestion_request_rejects_missing_required_fields() -> None:
         IngestionRequest(request_id="req-only")  # type: ignore[call-arg]
 
 
+def test_ingestion_request_validates_remote_file_source_config() -> None:
+    request = IngestionRequest(
+        request_id="req-rest-file",
+        dataset_id=DatasetId("corporations_cbca"),
+        source=SourceConfig(
+            source_id="corporations_cbca_csv",
+            source_name="Corporations Active CBCA CSV",
+            source_type="rest",
+            config={
+                "base_url": "https://example.com",
+                "endpoint": "/downloads/corporations-active-cbca-en.csv",
+                "response_mode": "FILE",
+                "download_filename": "corporations-active-cbca-en.csv",
+            },
+        ),
+        destination=_valid_destination(),
+        source_format="csv",
+    )
+    assert request.source.config["response_mode"] == "file"
+    assert request.source.config["download_filename"] == "corporations-active-cbca-en.csv"
+
+    with pytest.raises(
+        InvalidIngestionRequestError, match="Unsupported source.config.response_mode"
+    ):
+        IngestionRequest(
+            request_id="req-bad-mode",
+            dataset_id=DatasetId("corporations_cbca"),
+            source=SourceConfig(
+                source_id="corporations_cbca_csv",
+                source_name="Corporations Active CBCA CSV",
+                source_type="rest",
+                config={"base_url": "https://example.com", "response_mode": "stream_xml"},
+            ),
+            destination=_valid_destination(),
+            source_format="csv",
+        )
+
+    with pytest.raises(InvalidIngestionRequestError, match="download_filename"):
+        IngestionRequest(
+            request_id="req-bad-filename",
+            dataset_id=DatasetId("corporations_cbca"),
+            source=SourceConfig(
+                source_id="corporations_cbca_csv",
+                source_name="Corporations Active CBCA CSV",
+                source_type="rest",
+                config={
+                    "base_url": "https://example.com",
+                    "response_mode": "file",
+                    "download_filename": "../../escape.csv",
+                },
+            ),
+            destination=_valid_destination(),
+            source_format="csv",
+        )
+
+
 def test_ingestion_result_successful_construction_and_duration() -> None:
     start = datetime(2026, 1, 15, 12, 0, 0, tzinfo=UTC)
     end = start + timedelta(seconds=12.5)
