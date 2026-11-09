@@ -12,7 +12,7 @@ from atlas_connectors import (
     ExtractionResult,
     SourceConfig,
 )
-from atlas_core import Artifact, DatasetId, ExecutionStatus
+from atlas_core import BRONZE, Artifact, Dataset, DatasetId, ExecutionStatus, MetadataProvider
 from atlas_ingestion.exceptions import (
     ExecutionTrackingError,
     ExtractionError,
@@ -25,6 +25,7 @@ from atlas_ingestion.models.ingestion_request import IngestionRequest
 from atlas_ingestion.pipeline import IngestionPipeline
 from atlas_ingestion.service import IngestionService
 from atlas_ingestion.tracking.execution_tracker import ExecutionTracker
+from atlas_metadata import ArtifactMetadata, DatasetMetadata, MetadataService
 from atlas_storage import StorageLocation, StorageWriteError
 
 
@@ -297,3 +298,121 @@ def test_staging_cleanup_failure_does_not_overwrite_successful_ingestion_result(
     assert result.lifecycle_state == IngestionState.COMPLETED
     assert len(result.artifacts) == 1
     assert "Simulated file lock" in result.metadata.get("staging_cleanup_error", "")
+
+
+class MockMetadataProvider(MetadataProvider):
+    """Spy implementation of MetadataProvider recording dataset and artifact registrations."""
+
+    def __init__(self) -> None:
+        self.registered_datasets: list[tuple[DatasetMetadata | Dataset, bool]] = []
+        self.registered_artifacts: list[tuple[ArtifactMetadata, bool]] = []
+
+    def register_dataset(
+        self,
+        dataset: DatasetMetadata | Dataset,
+        *,
+        overwrite: bool = False,
+    ) -> DatasetMetadata | Dataset:
+        self.registered_datasets.append((dataset, overwrite))
+        return dataset
+
+    def get_dataset(self, dataset_id: str) -> Dataset | None:
+        return None
+
+    def register_artifact(
+        self,
+        artifact: ArtifactMetadata,
+        *,
+        overwrite: bool = False,
+    ) -> ArtifactMetadata:
+        self.registered_artifacts.append((artifact, overwrite))
+        return artifact
+
+
+def test_ingestion_service_auto_registers_dataset_and_artifact_metadata() -> None:
+    mock_metadata = MockMetadataProvider()
+    service = IngestionService(
+        extractor=StubExtractor(),
+        loader=StubLoader(),
+        metadata_provider=mock_metadata,
+    )
+
+    request = IngestionRequest(
+        request_id="req-meta-1",
+        dataset_id=DatasetId("corporations_cbca"),
+        source=SourceConfig(
+            source_id="src-cbca",
+            source_name="CBCA Source",
+            source_type="local_file",
+            config={"path": "drop/corporations.csv"},
+        ),
+        destination=StorageLocation(
+            layer="bronze",
+            path="data/bronze/corporations.parquet",
+            format="parquet",
+        ),
+        source_format="csv",
+        tags=["raw", "corporations"],
+    )
+
+    result = service.ingest(request, execution_id="exec-meta-001")
+    assert result.success is True
+    assert result.status == ExecutionStatus.SUCCEEDED
+
+    assert len(mock_metadata.registered_datasets) == 1
+    registered_ds, ds_overwrite = mock_metadata.registered_datasets[0]
+    assert isinstance(registered_ds, DatasetMetadata)
+    assert ds_overwrite is True
+    assert registered_ds.dataset_id == "corporations_cbca"
+    assert registered_ds.layer == BRONZE
+    assert registered_ds.format == "parquet"
+    assert registered_ds.location_uri == "data/bronze/corporations.parquet"
+    assert registered_ds.tags == ["raw", "corporations"]
+
+    assert len(mock_metadata.registered_artifacts) == 1
+    registered_art, art_overwrite = mock_metadata.registered_artifacts[0]
+    assert isinstance(registered_art, ArtifactMetadata)
+    assert art_overwrite is True
+    assert registered_art.dataset_id == "corporations_cbca"
+    assert registered_art.uri == "data/bronze/corporations.parquet"
+    assert registered_art.format == "parquet"
+    assert registered_art.layer == BRONZE
+    assert registered_art.execution_id == "exec-meta-001"
+    assert registered_art.row_count == 5
+
+
+def test_ingestion_service_with_real_metadata_service_and_skipped_on_failure() -> None:
+    metadata_service = MetadataService()
+    service = IngestionService(
+        extractor=StubExtractor(),
+        loader=StubLoader(),
+        metadata_provider=metadata_service,
+    )
+
+    result = service.ingest(_sample_request(), execution_id="exec-real-meta-1")
+    assert result.success is True
+
+    stored_ds = metadata_service.get_dataset_metadata("ds-pipe")
+    assert stored_ds is not None
+    assert stored_ds.layer == "bronze"
+    assert stored_ds.format == "parquet"
+
+    stored_artifacts = metadata_service.list_artifacts(
+        dataset_id="ds-pipe",
+        execution_id="exec-real-meta-1",
+    )
+    assert len(stored_artifacts) == 1
+    assert stored_artifacts[0].uri == "data/bronze/pipe.parquet"
+    assert stored_artifacts[0].execution_id == "exec-real-meta-1"
+
+    # Failed load should not register dataset or artifact metadata
+    failing_meta = MockMetadataProvider()
+    failing_service = IngestionService(
+        extractor=StubExtractor(fail=False),
+        loader=StubLoader(fail=True),
+        metadata_provider=failing_meta,
+    )
+    fail_res = failing_service.ingest(_sample_request(), execution_id="exec-fail-meta")
+    assert fail_res.success is False
+    assert failing_meta.registered_datasets == []
+    assert failing_meta.registered_artifacts == []

@@ -57,6 +57,7 @@ class IngestionRequest(BaseModel):
     source_format: str
     format_options: dict[str, Any] = Field(default_factory=dict)
     execution_config: ExecutionConfig = Field(default_factory=ExecutionConfig)
+    tags: list[str] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
     def __init__(self, **data: Any) -> None:
