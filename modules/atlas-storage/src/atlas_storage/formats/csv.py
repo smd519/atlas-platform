@@ -30,7 +30,8 @@ def serialize_csv(data: Any) -> bytes:
         return data.encode("utf-8")
     try:
         dataframe = _coerce_dataframe(data)
-        return dataframe.to_csv(index=False).encode("utf-8")
+        csv_text = dataframe.to_csv(index=False)
+        return (csv_text or "").encode("utf-8")
     except SerializationError:
         raise
     except Exception as exc:
