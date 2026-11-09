@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -14,6 +15,15 @@ from atlas_connectors.exceptions import (
     ConnectorExtractionError,
 )
 from atlas_connectors.http.auth import AuthStrategy
+
+
+def _cleanup_part_file(part_path: Path) -> None:
+    """Best-effort removal of an incomplete ``.part`` download artifact."""
+    try:
+        if part_path.exists():
+            part_path.unlink()
+    except OSError:
+        pass
 
 
 class RestConnector(Connector):
@@ -39,13 +49,17 @@ class RestConnector(Connector):
         self.endpoint = endpoint
         self.timeout = timeout
 
+    def _build_url(self, endpoint: str = "") -> str:
+        """Resolve the full request URL for ``endpoint`` (or ``self.endpoint``)."""
+        target_ep = endpoint or self.endpoint
+        if target_ep and not target_ep.startswith("/"):
+            return f"{self.base_url}/{target_ep}"
+        return f"{self.base_url}{target_ep}"
+
     @property
     def source_name(self) -> str:
         """Return the configured REST endpoint URL."""
-        if self.endpoint:
-            ep = self.endpoint if self.endpoint.startswith("/") else f"/{self.endpoint}"
-            return f"{self.base_url}{ep}"
-        return self.base_url
+        return self._build_url()
 
     def validate_connection(self) -> bool:
         """Validate that the REST base URL is well-formed and reachable if probed."""
@@ -54,11 +68,7 @@ class RestConnector(Connector):
     def get(self, endpoint: str = "") -> Any:
         """Execute an HTTP GET request against ``endpoint`` and return parsed JSON."""
         headers = self.auth.get_headers() if self.auth else {}
-        target_ep = endpoint or self.endpoint
-        if target_ep and not target_ep.startswith("/"):
-            url = f"{self.base_url}/{target_ep}"
-        else:
-            url = f"{self.base_url}{target_ep}"
+        url = self._build_url(endpoint)
 
         try:
             response = httpx.get(
@@ -86,9 +96,74 @@ class RestConnector(Connector):
                 f"Failed to decode JSON response from '{url}': {exc}"
             ) from exc
 
-    def extract(self, **kwargs: Any) -> Any:
+    def _stream_to_destination(self, destination: Path, endpoint: str = "") -> Path:
+        """Stream an HTTP GET response to a ``.part`` file and atomically replace destination."""
+        dest_path = destination if isinstance(destination, Path) else Path(destination)
+        parent_dir = dest_path.parent
+        if not parent_dir.exists() or not parent_dir.is_dir():
+            raise ConnectorConfigurationError(
+                f"Destination parent directory does not exist: '{parent_dir}'."
+            )
+
+        headers = self.auth.get_headers() if self.auth else {}
+        url = self._build_url(endpoint)
+        part_path = dest_path.with_suffix(dest_path.suffix + ".part")
+
+        try:
+            with httpx.stream(
+                "GET",
+                url,
+                headers=headers,
+                timeout=self.timeout,
+            ) as response:
+                response.raise_for_status()
+
+                with part_path.open("wb") as file:
+                    for chunk in response.iter_bytes():
+                        if chunk:
+                            file.write(chunk)
+
+            part_path.replace(dest_path)
+            return dest_path
+        except httpx.HTTPStatusError as exc:
+            _cleanup_part_file(part_path)
+            status_code = exc.response.status_code
+            if status_code in {401, 403}:
+                raise ConnectorAuthenticationError(
+                    f"Authentication failed with status {status_code} for '{url}'."
+                ) from exc
+            raise ConnectorExtractionError(
+                f"HTTP request failed with status {status_code} for '{url}'."
+            ) from exc
+        except (
+            httpx.ReadTimeout,
+            httpx.ConnectTimeout,
+            httpx.ConnectError,
+            httpx.RequestError,
+        ) as exc:
+            _cleanup_part_file(part_path)
+            raise ConnectorConnectionError(
+                f"Failed to stream from REST endpoint '{url}': {exc}"
+            ) from exc
+        except OSError as exc:
+            _cleanup_part_file(part_path)
+            raise ConnectorExtractionError(
+                f"Filesystem error while writing download to '{dest_path}': {exc}"
+            ) from exc
+        except Exception:
+            _cleanup_part_file(part_path)
+            raise
+
+    def extract(
+        self,
+        *,
+        destination: Path | None = None,
+        **kwargs: Any,
+    ) -> Any:
         """Execute extraction through the standard :class:`Connector` contract."""
         endpoint = str(kwargs.get("endpoint", self.endpoint))
+        if destination is not None:
+            return self._stream_to_destination(destination, endpoint=endpoint)
         return self.get(endpoint)
 
 
@@ -140,10 +215,15 @@ class RestConnectorAdapter(Connector):
         """Validate the wrapped REST connector configuration."""
         return self._connector.validate_connection()
 
-    def extract(self, **kwargs: Any) -> Any:
+    def extract(
+        self,
+        *,
+        destination: Path | None = None,
+        **kwargs: Any,
+    ) -> Any:
         """Delegate extraction to the wrapped :class:`RestConnector`."""
         endpoint = str(kwargs.get("endpoint", self._default_endpoint))
-        return self._connector.get(endpoint)
+        return self._connector.extract(destination=destination, endpoint=endpoint)
 
 
 __all__ = [

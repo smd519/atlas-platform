@@ -31,8 +31,14 @@ class LocalFileConnector(Connector):
         """Return True if the configured path exists and is a file."""
         return self._path.exists() and self._path.is_file()
 
-    def extract(self, **kwargs: Any) -> Path:
+    def extract(
+        self,
+        *,
+        destination: Path | None = None,
+        **kwargs: Any,
+    ) -> Path:
         """Validate that the local file exists and return its :class:`Path`."""
+        _ = destination
         if not self.validate_connection():
             raise ConnectorExtractionError(f"Local source file does not exist: '{self._path}'.")
         return self._path
