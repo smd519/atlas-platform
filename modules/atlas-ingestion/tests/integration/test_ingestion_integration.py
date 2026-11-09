@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pandas as pd  # type: ignore[import-untyped]
 import pytest
 from atlas_connectors import (
     ConnectorRegistry,
     LocalFileConnector,
+    RestConnector,
     SourceConfig,
 )
 from atlas_core import (
@@ -267,3 +271,253 @@ def test_integration_storage_failure_and_execution_failure_tracking(tmp_path: Pa
         IngestionState.LOADING,
         IngestionState.FAILED,
     ]
+
+
+class _MockHttpStreamResponse:
+    """Mock httpx.stream response for remote file ingestion tests."""
+
+    def __init__(
+        self,
+        url: str,
+        chunks: list[bytes],
+        *,
+        status_code: int = 200,
+        timeout_after_first_chunk: bool = False,
+    ) -> None:
+        self.url = url
+        self._chunks = list(chunks)
+        self.status_code = status_code
+        self._timeout_after_first_chunk = timeout_after_first_chunk
+
+    def raise_for_status(self) -> None:
+        if self.status_code >= 400:
+            req = httpx.Request("GET", self.url)
+            resp = httpx.Response(self.status_code, request=req)
+            raise httpx.HTTPStatusError(f"HTTP {self.status_code}", request=req, response=resp)
+
+    def iter_bytes(self) -> Iterator[bytes]:
+        for idx, chunk in enumerate(self._chunks):
+            yield chunk
+            if idx == 0 and self._timeout_after_first_chunk:
+                req = httpx.Request("GET", self.url)
+                raise httpx.ReadTimeout("Simulated stream interruption", request=req)
+
+
+def test_integration_remote_rest_csv_ingestion_stages_loads_bronze_and_cleans_up(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    expected_staging_file = (
+        tmp_path / "drop" / ".staging" / "exec-rest-csv-1" / "corporations-active-cbca-en.csv"
+    ).resolve()
+    observed_during_save: dict[str, bool] = {}
+
+    class InspectingFileSystemBackend(FileSystemBackend):
+        def save(self, data: Any, path: str) -> None:
+            # Verify staging file still exists on disk right when Bronze persistence runs
+            observed_during_save["staged_file_existed_before_bronze_save"] = (
+                expected_staging_file.exists()
+            )
+            super().save(data, path)
+
+    @contextmanager
+    def fake_stream(
+        method: str,
+        url: str,
+        *,
+        headers: dict[str, str] | None = None,
+        timeout: float | None = None,
+    ) -> Iterator[_MockHttpStreamResponse]:
+        yield _MockHttpStreamResponse(
+            url,
+            chunks=[
+                b"corporation_id,name,status\n",
+                b"1001,Maple Robotics Inc.,Active\n",
+                b"1002,Northern Photonics Ltd.,Active\n",
+            ],
+        )
+
+    monkeypatch.setattr(httpx, "stream", fake_stream)
+
+    # Create another execution's staging directory to verify execution isolation
+    other_exec_staging_dir = tmp_path / "drop" / ".staging" / "exec-other-999"
+    other_exec_staging_dir.mkdir(parents=True, exist_ok=True)
+    other_exec_file = other_exec_staging_dir / "other.csv"
+    other_exec_file.write_text("id\n999\n", encoding="utf-8")
+
+    dest_file = tmp_path / "data" / "bronze" / "corporations_cbca.parquet"
+    service = IngestionService(
+        storage_manager=StorageManager(backend=InspectingFileSystemBackend()),
+        workspace=tmp_path,
+    )
+
+    request = IngestionRequest(
+        request_id="req-rest-csv-1",
+        dataset_id=DatasetId("corporations_cbca"),
+        source=SourceConfig(
+            source_id="corporations_cbca_csv",
+            source_name="Corporations Active CBCA CSV",
+            source_type="rest",
+            config={
+                "base_url": "https://example.com",
+                "endpoint": "/downloads/corporations-active-cbca-en.csv",
+                "response_mode": "file",
+                "download_filename": "corporations-active-cbca-en.csv",
+            },
+        ),
+        destination=StorageLocation(
+            layer=BRONZE,
+            path=str(dest_file),
+            format="parquet",
+        ),
+        source_format="csv",
+    )
+
+    result = service.ingest(request, execution_id="exec-rest-csv-1")
+
+    assert result.success is True
+    assert result.status == ExecutionStatus.SUCCEEDED
+    assert result.lifecycle_state == IngestionState.COMPLETED
+    assert result.row_count == 2
+    assert len(result.artifacts) == 1
+    assert observed_during_save == {"staged_file_existed_before_bronze_save": True}
+
+    # Bronze file was persisted and contains the parsed records
+    assert dest_file.exists()
+    loaded_df = StorageManager(backend=FileSystemBackend()).load(request.destination)
+    assert len(loaded_df) == 2
+    assert list(loaded_df["corporation_id"]) == [1001, 1002]
+
+    # Current execution's staging directory was cleaned up after Bronze persistence succeeded
+    assert not expected_staging_file.exists()
+    assert not expected_staging_file.parent.exists()
+
+    # Another execution's staging files remain completely untouched
+    assert other_exec_file.exists()
+    assert other_exec_file.read_text(encoding="utf-8") == "id\n999\n"
+
+
+def test_integration_remote_rest_failed_download_cleans_up_part_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    @contextmanager
+    def fake_stream(
+        method: str,
+        url: str,
+        *,
+        headers: dict[str, str] | None = None,
+        timeout: float | None = None,
+    ) -> Iterator[_MockHttpStreamResponse]:
+        yield _MockHttpStreamResponse(
+            url,
+            chunks=[b"corporation_id,name\n1001,Partial Row\n", b"1002,Never Reached\n"],
+            timeout_after_first_chunk=True,
+        )
+
+    monkeypatch.setattr(httpx, "stream", fake_stream)
+
+    dest_file = tmp_path / "data" / "bronze" / "corporations_failed.parquet"
+    service = IngestionService(workspace=tmp_path)
+
+    request = IngestionRequest(
+        request_id="req-rest-dl-fail",
+        dataset_id=DatasetId("corporations_cbca"),
+        source=SourceConfig(
+            source_id="corporations_cbca_csv",
+            source_name="Corporations Active CBCA CSV",
+            source_type="rest",
+            config={
+                "base_url": "https://example.com",
+                "endpoint": "/downloads/corporations-active-cbca-en.csv",
+                "response_mode": "file",
+                "download_filename": "corporations-active-cbca-en.csv",
+            },
+        ),
+        destination=StorageLocation(
+            layer=BRONZE,
+            path=str(dest_file),
+            format="parquet",
+        ),
+        source_format="csv",
+    )
+
+    result = service.ingest(request, execution_id="exec-dl-fail-1")
+
+    assert result.success is False
+    assert result.status == ExecutionStatus.FAILED
+    assert result.error_type == "ExtractionError"
+    assert not dest_file.exists()
+
+    staging_dir = tmp_path / "drop" / ".staging" / "exec-dl-fail-1"
+    part_files = list(staging_dir.glob("*.part")) if staging_dir.exists() else []
+    assert part_files == []
+    assert not (staging_dir / "corporations-active-cbca-en.csv").exists()
+
+
+def test_integration_remote_rest_failed_bronze_load_preserves_diagnostic_staging_artifact(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    @contextmanager
+    def fake_stream(
+        method: str,
+        url: str,
+        *,
+        headers: dict[str, str] | None = None,
+        timeout: float | None = None,
+    ) -> Iterator[_MockHttpStreamResponse]:
+        yield _MockHttpStreamResponse(
+            url,
+            chunks=[b"corporation_id,name\n1001,Diagnostic Corp\n"],
+        )
+
+    monkeypatch.setattr(httpx, "stream", fake_stream)
+
+    dest_file = tmp_path / "data" / "bronze" / "corporations_load_fail.parquet"
+    connector_registry = ConnectorRegistry()
+    connector_registry.register("rest", RestConnector)
+
+    service = IngestionService(
+        connector_registry=connector_registry,
+        storage_manager=StorageManager(backend=_FailingWriteBackend()),
+        workspace=tmp_path,
+    )
+
+    request = IngestionRequest(
+        request_id="req-rest-load-fail",
+        dataset_id=DatasetId("corporations_cbca"),
+        source=SourceConfig(
+            source_id="corporations_cbca_csv",
+            source_name="Corporations Active CBCA CSV",
+            source_type="rest",
+            config={
+                "base_url": "https://example.com",
+                "endpoint": "/downloads/corporations-active-cbca-en.csv",
+                "response_mode": "file",
+                "download_filename": "corporations-active-cbca-en.csv",
+            },
+        ),
+        destination=StorageLocation(
+            layer=BRONZE,
+            path=str(dest_file),
+            format="parquet",
+        ),
+        source_format="csv",
+    )
+
+    result = service.ingest(request, execution_id="exec-load-fail-diag")
+
+    assert result.success is False
+    assert result.status == ExecutionStatus.FAILED
+    assert result.error_type == "LoadingError"
+
+    expected_staging_file = (
+        tmp_path / "drop" / ".staging" / "exec-load-fail-diag" / "corporations-active-cbca-en.csv"
+    ).resolve()
+    assert expected_staging_file.exists()
+    assert (
+        expected_staging_file.read_text(encoding="utf-8")
+        == "corporation_id,name\n1001,Diagnostic Corp\n"
+    )
+    assert result.metadata.get("staging_path") == str(expected_staging_file)

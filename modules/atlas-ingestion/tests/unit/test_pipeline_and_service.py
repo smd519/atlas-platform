@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
 
 import pytest
 from atlas_connectors import (
@@ -248,3 +250,50 @@ def test_ingestion_service_delegates_to_pipeline_and_exposes_executions() -> Non
     assert record.id == "exec-svc-1"
     assert record.status == ExecutionStatus.SUCCEEDED
     assert len(service.list_executions()) == 1
+
+
+def test_staging_cleanup_failure_does_not_overwrite_successful_ingestion_result(
+    tmp_path: Path,
+) -> None:
+    staging_dir = tmp_path / "drop" / ".staging" / "exec-cleanup-err"
+    staging_dir.mkdir(parents=True, exist_ok=True)
+    staged_file = staging_dir / "corporations.csv"
+    staged_file.write_text("id,name\n1,Acme\n", encoding="utf-8")
+
+    class StagedStubExtractor(Extractor):
+        def extract(
+            self,
+            request: IngestionRequest,
+            *,
+            execution_id: str | None = None,
+            destination: Path | None = None,
+        ) -> ExtractionResult:
+            return ExtractionResult(
+                source_id=request.source.source_id,
+                row_count=1,
+                extracted_at=datetime(2026, 4, 1, 12, 0, tzinfo=UTC),
+                data=[{"id": 1, "name": "Acme"}],
+            )
+
+        def get_staging_directory(self, execution_id: str) -> Path | None:
+            return staging_dir if execution_id == "exec-cleanup-err" else None
+
+        def get_staged_file(self, execution_id: str) -> Path | None:
+            return staged_file if execution_id == "exec-cleanup-err" else None
+
+    def failing_rmtree(target: Path) -> Any:
+        raise PermissionError(f"Simulated file lock on '{target}'")
+
+    pipeline = IngestionPipeline(
+        extractor=StagedStubExtractor(),
+        loader=StubLoader(fail=False),
+        tracker=ExecutionTracker(),
+        rmtree_fn=failing_rmtree,
+    )
+
+    result = pipeline.run(_sample_request(), execution_id="exec-cleanup-err")
+    assert result.success is True
+    assert result.status == ExecutionStatus.SUCCEEDED
+    assert result.lifecycle_state == IngestionState.COMPLETED
+    assert len(result.artifacts) == 1
+    assert "Simulated file lock" in result.metadata.get("staging_cleanup_error", "")

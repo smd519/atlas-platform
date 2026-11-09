@@ -1,8 +1,12 @@
-"""Coordinates ingestion extraction, loading, and tracking."""
+"""Coordinates ingestion extraction, loading, staging cleanup, and tracking."""
 
 from __future__ import annotations
 
+import inspect
+import shutil
+from collections.abc import Callable
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 from atlas_core import ExecutionStatus, get_logger
@@ -23,18 +27,52 @@ from atlas_ingestion.tracking.execution_tracker import (
 )
 
 
+def _accepts_keyword_arg(fn: Callable[..., Any], keyword: str) -> bool:
+    """Return True if ``fn`` accepts ``keyword`` or ``**kwargs``."""
+    try:
+        sig = inspect.signature(fn)
+    except (TypeError, ValueError):
+        return False
+    for param in sig.parameters.values():
+        if param.name == keyword and param.kind in (
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            inspect.Parameter.KEYWORD_ONLY,
+        ):
+            return True
+        if param.kind == inspect.Parameter.VAR_KEYWORD:
+            return True
+    return False
+
+
 class IngestionPipeline:
-    """Coordinates validation, extraction, raw layer loading, and execution tracking."""
+    """Coordinates validation, extraction, raw layer loading, staging cleanup, and tracking.
+
+    Staging & Cleanup Policy
+    ------------------------
+    - Remote file downloads are staged inside ``<workspace>/drop/.staging/<execution_id>/``.
+    - Staging files are never deleted before Bronze persistence (``Loader.load``) succeeds.
+    - On successful Bronze persistence, only the current execution's staging directory
+      ``<workspace>/drop/.staging/<execution_id>/`` is removed. Cleanup errors are logged
+      and never mask or overwrite a successful ``IngestionResult``.
+    - On failed ingestion, any completed staging file in ``drop/.staging/<execution_id>/``
+      is preserved for diagnostics (and recorded in ``metadata["staging_path"]``), while
+      incomplete ``.part`` artifacts are removed.
+    - Local files read via ``LocalFileConnector`` are never copied, moved, or deleted.
+    """
 
     def __init__(
         self,
         extractor: Extractor | None = None,
         loader: Loader | None = None,
         tracker: ExecutionTracker | None = None,
+        *,
+        workspace: str | Path | None = None,
+        rmtree_fn: Callable[[Path], Any] | None = None,
     ) -> None:
-        self._extractor = extractor or Extractor()
+        self._extractor = extractor or Extractor(workspace=workspace)
         self._loader = loader or Loader()
         self._tracker = tracker or ExecutionTracker()
+        self._rmtree_fn = rmtree_fn or shutil.rmtree
         self._logger = get_logger("atlas.ingestion.pipeline")
 
     @property
@@ -73,8 +111,19 @@ class IngestionPipeline:
             self._tracker.start(exec_id)
 
             self._tracker.record_transition(exec_id, IngestionState.EXTRACTING)
-            extraction_result = self._extractor.extract(request)
-            source_meta = self._extractor.build_source_metadata(request, extraction_result)
+            if _accepts_keyword_arg(self._extractor.extract, "execution_id"):
+                extraction_result = self._extractor.extract(request, execution_id=exec_id)
+            else:
+                extraction_result = self._extractor.extract(request)
+
+            if _accepts_keyword_arg(self._extractor.build_source_metadata, "execution_id"):
+                source_meta = self._extractor.build_source_metadata(
+                    request,
+                    extraction_result,
+                    execution_id=exec_id,
+                )
+            else:
+                source_meta = self._extractor.build_source_metadata(request, extraction_result)
             combined_metadata.update(source_meta)
             self._tracker.record_transition(exec_id, IngestionState.EXTRACTED)
 
@@ -91,6 +140,12 @@ class IngestionPipeline:
                 artifact_ids=[artifact.id for artifact in artifacts],
             )
             completed_record = self._tracker.get_execution(exec_id)
+
+            self._cleanup_staging_on_success(
+                execution_id=exec_id,
+                request_id=request.request_id,
+                metadata=combined_metadata,
+            )
 
             self._logger.info(
                 "ingestion_execution_succeeded",
@@ -125,6 +180,78 @@ class IngestionPipeline:
                 should_raise=should_raise,
             )
 
+    def _cleanup_staging_on_success(
+        self,
+        *,
+        execution_id: str,
+        request_id: str,
+        metadata: dict[str, Any],
+    ) -> None:
+        """Delete only ``<workspace>/drop/.staging/<execution_id>`` after Bronze load succeeds."""
+        if not hasattr(self._extractor, "get_staging_directory"):
+            return
+        staging_dir = self._extractor.get_staging_directory(execution_id)
+        if staging_dir is None:
+            return
+
+        if staging_dir.name != execution_id or staging_dir.parent.name != ".staging":
+            self._logger.warning(
+                "ingestion_staging_cleanup_skipped_invalid_boundary",
+                request_id=request_id,
+                execution_id=execution_id,
+                staging_dir=str(staging_dir),
+            )
+            return
+
+        if not staging_dir.exists():
+            return
+
+        try:
+            self._rmtree_fn(staging_dir)
+            self._logger.info(
+                "ingestion_staging_cleaned_up",
+                request_id=request_id,
+                execution_id=execution_id,
+                staging_dir=str(staging_dir),
+            )
+        except Exception as cleanup_exc:
+            self._logger.error(
+                "ingestion_staging_cleanup_failed",
+                request_id=request_id,
+                execution_id=execution_id,
+                staging_dir=str(staging_dir),
+                error=str(cleanup_exc),
+            )
+            metadata["staging_cleanup_error"] = str(cleanup_exc)
+
+    def _preserve_or_tidy_staging_on_failure(
+        self,
+        *,
+        execution_id: str,
+        metadata: dict[str, Any],
+    ) -> None:
+        """Remove any leftover ``.part`` files while preserving diagnostic staging artifacts."""
+        if not hasattr(self._extractor, "get_staging_directory"):
+            return
+        staging_dir = self._extractor.get_staging_directory(execution_id)
+        if staging_dir is None or not staging_dir.exists():
+            return
+
+        try:
+            for item in list(staging_dir.iterdir()):
+                if item.is_file() and item.name.endswith(".part"):
+                    item.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+        staged_file = (
+            self._extractor.get_staged_file(execution_id)
+            if hasattr(self._extractor, "get_staged_file")
+            else None
+        )
+        if staged_file is not None and staged_file.exists():
+            metadata["staging_path"] = str(staged_file)
+
     @staticmethod
     def _validate_request(request: IngestionRequest) -> None:
         if not isinstance(request, IngestionRequest):
@@ -143,6 +270,11 @@ class IngestionPipeline:
         should_raise: bool,
     ) -> IngestionResult:
         exec_id = initial_record.id
+        self._preserve_or_tidy_staging_on_failure(
+            execution_id=exec_id,
+            metadata=metadata,
+        )
+
         if isinstance(error, IngestionError):
             error.request_id = error.request_id or request.request_id
             error.execution_id = error.execution_id or exec_id
