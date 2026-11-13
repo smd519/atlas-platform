@@ -189,10 +189,15 @@ class DatasetMetadata(BaseModel):
             id=self.dataset_id,
             name=self.name,
             layer=self.layer,
+            urn=str(self.urn),
+            namespace=self.namespace,
             source_id=self.source_id,
             format=self.format,
             path=self.location_uri,
             description=self.description,
+            owner=self.owner,
+            tags=list(self.tags),
+            upstream_urns=list(self.upstream_urns),
             metadata=meta,
         )
 
@@ -209,13 +214,19 @@ class DatasetMetadata(BaseModel):
     ) -> DatasetMetadata:
         """Create a :class:`DatasetMetadata` instance from an :class:`atlas_core.Dataset`."""
         raw_meta = dict(dataset.metadata or {})
-        resolved_ns = str(raw_meta.pop("namespace", namespace))
-        resolved_owner = owner if owner is not None else raw_meta.pop("owner", None)
-        raw_tags = tags if tags is not None else raw_meta.pop("tags", [])
+        ds_ns = getattr(dataset, "namespace", "default")
+        resolved_ns = str(raw_meta.pop("namespace", ds_ns if ds_ns != "default" else namespace))
+        ds_owner = getattr(dataset, "owner", None)
+        resolved_owner = owner if owner is not None else raw_meta.pop("owner", ds_owner)
+        ds_tags = getattr(dataset, "tags", None)
+        raw_tags = tags if tags is not None else raw_meta.pop("tags", ds_tags if ds_tags else [])
+        ds_upstream = getattr(dataset, "upstream_urns", None)
         raw_upstream = (
-            upstream_urns if upstream_urns is not None else raw_meta.pop("upstream_urns", [])
+            upstream_urns
+            if upstream_urns is not None
+            else raw_meta.pop("upstream_urns", ds_upstream if ds_upstream else [])
         )
-        raw_urn = raw_meta.pop("urn", None)
+        raw_urn = raw_meta.pop("urn", getattr(dataset, "urn", None))
         merged_props = {**raw_meta, **(custom_properties or {})}
 
         init_kwargs: dict[str, Any] = {
