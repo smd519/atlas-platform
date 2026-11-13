@@ -6,6 +6,7 @@ from typing import Any
 
 from atlas_core import (
     BRONZE,
+    DEFAULT_NAMESPACE,
     GOLD,
     SILVER,
     DatasetId,
@@ -50,10 +51,14 @@ class ProcessingRequest(BaseModel):
 
     request_id: str = Field(default_factory=generate_execution_id)
     dataset_id: DatasetId
+    source_dataset_id: DatasetId | None = None
+    namespace: str = DEFAULT_NAMESPACE
     source: StorageLocation
     destination: StorageLocation
     transformations: list[TransformationStep] = Field(default_factory=list)
     execution_config: ProcessingExecutionConfig = Field(default_factory=ProcessingExecutionConfig)
+    tags: list[str] = Field(default_factory=list)
+    upstream_urns: list[str] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
     def __init__(self, **data: Any) -> None:
@@ -74,6 +79,21 @@ class ProcessingRequest(BaseModel):
         self.request_id = _require_non_blank(self.request_id, "request_id")
         dataset_str = _require_non_blank(str(self.dataset_id), "dataset_id")
         self.dataset_id = DatasetId(dataset_str)
+
+        if self.source_dataset_id is not None:
+            source_ds_str = _require_non_blank(str(self.source_dataset_id), "source_dataset_id")
+            self.source_dataset_id = DatasetId(source_ds_str)
+
+        self.namespace = _require_non_blank(self.namespace, "namespace").lower()
+
+        if self.tags:
+            self.tags = list(dict.fromkeys(_require_non_blank(tag, "tags") for tag in self.tags))
+        if self.upstream_urns:
+            self.upstream_urns = list(
+                dict.fromkeys(
+                    _require_non_blank(urn, "upstream_urns") for urn in self.upstream_urns
+                )
+            )
 
         src_layer = _require_non_blank(self.source.layer, "source.layer").lower()
         if src_layer not in ALLOWED_SOURCE_LAYERS:

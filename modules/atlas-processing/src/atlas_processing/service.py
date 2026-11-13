@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from atlas_core import StorageProvider
+from atlas_core import MetadataProvider, StorageProvider
 from atlas_storage import StorageManager, StorageRegistry
 
 from atlas_processing.engine import ProcessingEngine
@@ -32,12 +32,15 @@ class ProcessingService:
         engine: ProcessingEngine | None = None,
         transformation_registry: TransformationRegistry | None = None,
         tracker: ExecutionTracker | None = None,
+        metadata_provider: MetadataProvider | None = None,
         storage_manager: StorageManager | None = None,
         storage_provider: StorageProvider | None = None,
         storage_registry: StorageRegistry | None = None,
     ) -> None:
         if pipeline is not None:
             self._pipeline = pipeline
+            if metadata_provider is not None:
+                self._pipeline._metadata = metadata_provider
         else:
             resolved_executor = executor or TransformationExecutor(
                 engine=engine,
@@ -47,6 +50,7 @@ class ProcessingService:
                 executor=resolved_executor,
                 storage_manager=storage_manager,
                 tracker=tracker,
+                metadata_provider=metadata_provider,
                 storage_provider=storage_provider,
                 storage_registry=storage_registry,
             )
