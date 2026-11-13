@@ -7,6 +7,7 @@ from typing import Any
 
 from atlas_core import (
     Artifact,
+    MetadataProvider,
     StorageProvider,
     generate_execution_id,
     get_logger,
@@ -43,6 +44,15 @@ from atlas_quality.tracking.execution_tracker import (
     QualityExecutionRecord,
 )
 
+LATEST_QUALITY_ASSESSMENT_KEY = "latest_quality_assessment"
+QUALITY_ASSESSMENT_HISTORY_KEY = "quality_assessment_history"
+MAX_QUALITY_ASSESSMENT_HISTORY = 10
+
+
+LATEST_QUALITY_ASSESSMENT_KEY = "latest_quality_assessment"
+QUALITY_ASSESSMENT_HISTORY_KEY = "quality_assessment_history"
+MAX_QUALITY_ASSESSMENT_HISTORY = 10
+
 
 def create_default_storage_registry() -> StorageRegistry:
     """Create a :class:`StorageRegistry` populated with standard storage backends."""
@@ -71,7 +81,9 @@ class QualityPipeline:
         storage_provider: StorageProvider | None = None,
         storage_registry: StorageRegistry | None = None,
         backend_name: str = "filesystem",
+        metadata_provider: MetadataProvider | None = None,
     ) -> None:
+        self._metadata = metadata_provider
         self._engine = engine or QualityEngine()
         self._profiler = profiler or DatasetProfiler()
         self._tracker = tracker or ExecutionTracker()
@@ -186,7 +198,6 @@ class QualityPipeline:
                 failed_rules=report.failed_rules,
                 execution_errors=report.execution_errors,
             )
-            return report
         except Exception as exc:
             return self._handle_failure(
                 request=request,
@@ -195,6 +206,74 @@ class QualityPipeline:
                 error=exc,
                 should_raise=should_raise,
             )
+
+        # Metadata publication is best-effort and must never alter the quality outcome.
+        self._publish_quality_metadata(request, report)
+        return report
+
+    def _publish_quality_metadata(
+        self,
+        request: QualityAssessmentRequest,
+        report: QualityReport,
+    ) -> None:
+        """Publish assessment results to the dataset catalog; never raises."""
+        if self._metadata is None:
+            return
+
+        dataset_id = str(request.dataset_id)
+        artifact_id = request.artifact.id if request.artifact is not None else None
+        try:
+            existing = self._metadata.get_dataset(dataset_id)
+            if existing is None:
+                self._logger.warning(
+                    "quality_metadata_dataset_not_found",
+                    dataset_id=dataset_id,
+                    artifact_id=artifact_id,
+                    execution_id=report.execution_id,
+                    detail="Dataset is not registered; skipping quality metadata registration.",
+                )
+                return
+
+            payload = self._build_assessment_payload(report, artifact_id)
+            properties = dict(existing.metadata or {})
+            raw_history = properties.get(QUALITY_ASSESSMENT_HISTORY_KEY)
+            history = list(raw_history) if isinstance(raw_history, list) else []
+            history.append(payload)
+            history = history[-MAX_QUALITY_ASSESSMENT_HISTORY:]
+
+            properties[LATEST_QUALITY_ASSESSMENT_KEY] = payload
+            properties[QUALITY_ASSESSMENT_HISTORY_KEY] = history
+
+            updated = existing.model_copy(update={"metadata": properties})
+            self._metadata.register_dataset_metadata(updated, overwrite=True)
+        except Exception as exc:
+            self._logger.warning(
+                "quality_metadata_registration_failed",
+                dataset_id=dataset_id,
+                artifact_id=artifact_id,
+                execution_id=report.execution_id,
+                error=str(exc),
+                error_type=type(exc).__name__,
+            )
+
+    @staticmethod
+    def _build_assessment_payload(report: QualityReport, artifact_id: str | None) -> dict[str, Any]:
+        """Build a JSON-compatible summary of ``report`` for catalog storage."""
+        status = str(report.overall_status)
+        return {
+            "execution_id": report.execution_id,
+            "assessment_id": report.assessment_id,
+            "artifact_id": artifact_id,
+            "assessment_timestamp": report.assessment_timestamp.isoformat(),
+            "overall_status": status,
+            "passed": report.overall_status
+            in (QualityAssessmentStatus.PASSED, QualityAssessmentStatus.PASSED_WITH_WARNINGS),
+            "total_assertions": report.total_rules,
+            "passed_assertions": report.passed_rules,
+            "failed_assertions": report.failed_rules,
+            "execution_errors": report.execution_errors,
+            "quality_score": report.quality_score,
+        }
 
     def _load_dataset(
         self,

@@ -9,6 +9,7 @@ from atlas_core import (
     Artifact,
     DatasetId,
     ExecutionStatus,
+    MetadataProvider,
     StorageProvider,
     generate_execution_id,
 )
@@ -48,6 +49,7 @@ class QualityService:
         storage_manager: StorageManager | None = None,
         storage_provider: StorageProvider | None = None,
         storage_registry: StorageRegistry | None = None,
+        metadata_provider: MetadataProvider | None = None,
     ) -> None:
         if pipeline is not None:
             self._pipeline = pipeline
@@ -60,6 +62,7 @@ class QualityService:
                 tracker=tracker,
                 storage_provider=storage_provider,
                 storage_registry=storage_registry,
+                metadata_provider=metadata_provider,
             )
 
     def assess(
