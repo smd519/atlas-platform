@@ -142,7 +142,7 @@ class FilterTransformation(Transformation):
             parsed_conditions.append(
                 FilterCondition(
                     column=self._raw_column,
-                    operator=self._raw_operator,  # type: ignore[arg-type]
+                    operator=self._raw_operator,
                     value=self._raw_value,
                 )
             )
