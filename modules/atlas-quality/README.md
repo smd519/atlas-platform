@@ -13,6 +13,7 @@ It provides reusable, configurable, and engine-abstracted data quality rules, op
 - **Engine Abstraction**: Rule implementations in `atlas_quality.rules` operate against `QualityDatasetAdapter` rather than coupling directly to `pandas`, enabling future PySpark or SQL execution engines.
 - **Privacy by Default**: `QualityIssue` redacts sample source values by default (`expose_samples=False`) and enforces configurable `sample_limit` bounds.
 - **Safe Rule Evaluation**: Configurable consistency and validity rules use structured operators and never invoke `eval()` or arbitrary code execution.
+- **Metadata Integration (Phase 2)**: Accepts an optional `MetadataProvider` to publish assessment results to the dataset catalog under `custom_properties` with bounded history.
 
 ### Dependency Rules
 
@@ -101,10 +102,22 @@ modules/atlas-quality/
 
 ---
 
-## 5. Usage Example
+## 5. Metadata Catalog Integration (Phase 2)
+
+`QualityService` and `QualityPipeline` optionally accept `metadata_provider: MetadataProvider | None = None` (imported from `atlas_core`).
+
+When configured:
+- **Catalog Publication**: When an assessment completes, retrieves the existing dataset from the catalog via `get_dataset(dataset_id)`. If found, merges properties and registers the updated dataset via `register_dataset_metadata(..., overwrite=True)`.
+- **Artifact-Aware Payload**: Stores the assessment summary under `custom_properties["latest_quality_assessment"]`. When assessing a specific artifact, the payload includes its `artifact_id`; otherwise `artifact_id` is `None`. Includes `execution_id`, timestamp, overall status, assertion counts, and quality score.
+- **Bounded History**: Appends the payload to `custom_properties["quality_assessment_history"]`, maintaining a bounded list capped at 10 historical records (evicting the oldest record when exceeding capacity) to prevent catalog bloat.
+- **Failure Isolation**: Metadata registration is strictly non-fatal; catalog errors are logged as warnings and never fail or mask the quality assessment result.
+
+---
+
+## 6. Usage Example
 
 ```python
-from atlas_core import DatasetId
+from atlas_core import DatasetId, MetadataProvider
 from atlas_quality import (
     QualityAssessmentRequest,
     QualityRuleConfig,
@@ -117,7 +130,9 @@ dataset = [
     {"order_id": "ORD-002", "customer_id": "C-20", "amount": 75.00},
 ]
 
-service = QualityService()
+# Optional: inject an atlas_core.MetadataProvider implementation
+metadata_provider: MetadataProvider | None = None
+service = QualityService(metadata_provider=metadata_provider)
 request = QualityAssessmentRequest(
     dataset_id=DatasetId("orders_silver"),
     dataset=dataset,
@@ -147,7 +162,7 @@ print(report.overall_status, report.quality_score)
 
 ---
 
-## 6. Testing
+## 7. Testing
 
 Run unit and integration tests from the repository root:
 

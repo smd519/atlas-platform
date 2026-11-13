@@ -19,6 +19,7 @@ Raw data acquisition, execution-specific remote file staging, and ingestion life
 - Resolve and invoke source connectors through `atlas-connectors` public interfaces (`Extractor`), passing `destination=staging_path` for remote file acquisitions.
 - Parse local or staged files (`csv`, `json`, `parquet`, `raw`/`bytes`) and persist datasets into the raw (`bronze`) layer through `atlas-storage` public interfaces (`Loader`).
 - Deterministically clean up execution-specific staging directories after Bronze persistence succeeds while preserving diagnostic staging artifacts when loading fails.
+- Auto-register Bronze datasets and physical artifacts in the metadata catalog via `MetadataProvider` when configured.
 - Produce standardized outcomes and output artifact references (`IngestionResult`).
 - Expose a clean, dependency-injected public entry point (`IngestionService`) for `atlas-orchestration`.
 
@@ -124,11 +125,22 @@ source:
 
 ---
 
+## Metadata Registration (Phase 2)
+
+`IngestionService` and `IngestionPipeline` optionally accept `metadata_provider: MetadataProvider | None = None` (imported from `atlas_core`).
+
+When configured:
+- **Bronze Dataset Auto-Registration**: Once raw data persistence to Bronze succeeds, the pipeline automatically registers or updates the dataset record in the catalog via `register_dataset_metadata(..., overwrite=True)`.
+- **Physical Artifact Provenance**: Automatically registers the physical output artifact(s) via `register_artifact(...)`, linking each artifact to its parent dataset, physical storage URI, format, row count, and `execution_id`.
+- **Failure Isolation**: Metadata registration is non-fatal; catalog errors are logged and do not fail an otherwise successful ingestion execution.
+
+---
+
 ## Python Usage Example
 
 ```python
 from atlas_connectors import SourceConfig
-from atlas_core import BRONZE, DatasetId
+from atlas_core import BRONZE, DatasetId, MetadataProvider
 from atlas_storage import StorageLocation
 
 from atlas_ingestion import (
@@ -137,7 +149,9 @@ from atlas_ingestion import (
     IngestionService,
 )
 
-service = IngestionService()
+# Optional: inject an atlas_core.MetadataProvider implementation
+metadata_provider: MetadataProvider | None = None
+service = IngestionService(metadata_provider=metadata_provider)
 
 request = IngestionRequest(
     dataset_id=DatasetId("corporations_cbca"),
