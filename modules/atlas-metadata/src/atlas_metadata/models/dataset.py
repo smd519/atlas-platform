@@ -227,6 +227,7 @@ class DatasetMetadata(BaseModel):
             else raw_meta.pop("upstream_urns", ds_upstream if ds_upstream else [])
         )
         raw_urn = raw_meta.pop("urn", getattr(dataset, "urn", None))
+        raw_schema_version = raw_meta.pop("latest_schema_version", None)
         merged_props = {**raw_meta, **(custom_properties or {})}
 
         init_kwargs: dict[str, Any] = {
@@ -247,6 +248,8 @@ class DatasetMetadata(BaseModel):
         }
         if raw_urn is not None:
             init_kwargs["urn"] = raw_urn
+        if isinstance(raw_schema_version, int) and not isinstance(raw_schema_version, bool):
+            init_kwargs["latest_schema_version"] = raw_schema_version
         return cls(**init_kwargs)
 
 
