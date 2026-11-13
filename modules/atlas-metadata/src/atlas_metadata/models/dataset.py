@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from atlas_core import BRONZE, Dataset, require_not_empty
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from atlas_metadata.exceptions import InvalidMetadataError, InvalidURNError
 from atlas_metadata.identifiers.urn import URN
@@ -53,6 +53,26 @@ def normalize_tags(tags: list[str]) -> list[str]:
     return normalized
 
 
+def normalize_upstream_urns(upstream_urns: Any) -> list[str]:
+    """Validate, normalize to stripped strings, and deduplicate upstream URNs."""
+    if upstream_urns is None:
+        return []
+    if not isinstance(upstream_urns, (list, tuple)):
+        raise InvalidMetadataError("upstream_urns must be a list of URN strings.")
+    seen: set[str] = set()
+    normalized: list[str] = []
+    for raw in upstream_urns:
+        if raw is None or isinstance(raw, bool):
+            raise InvalidMetadataError("Upstream URN entries must be non-empty strings.")
+        cleaned = str(raw).strip()
+        if not cleaned:
+            raise InvalidMetadataError("Upstream URN entries must be non-empty strings.")
+        if cleaned not in seen:
+            seen.add(cleaned)
+            normalized.append(cleaned)
+    return normalized
+
+
 class DatasetMetadata(BaseModel):
     """Domain metadata record for a registered dataset in the Atlas catalog."""
 
@@ -69,6 +89,7 @@ class DatasetMetadata(BaseModel):
     description: str | None = None
     owner: str | None = None
     tags: list[str] = Field(default_factory=list)
+    upstream_urns: list[str] = Field(default_factory=list)
     custom_properties: dict[str, Any] = Field(default_factory=dict)
     latest_schema_version: int | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
@@ -111,6 +132,11 @@ class DatasetMetadata(BaseModel):
         except Exception as exc:
             raise InvalidMetadataError(f"Invalid dataset metadata: {exc}") from exc
 
+    @field_validator("upstream_urns", mode="before")
+    @classmethod
+    def _coerce_upstream_urns(cls, value: Any) -> list[str]:
+        return normalize_upstream_urns(value)
+
     @model_validator(mode="after")
     def _validate_dataset_metadata(self) -> DatasetMetadata:
         try:
@@ -134,6 +160,7 @@ class DatasetMetadata(BaseModel):
         object.__setattr__(self, "layer", self.layer.strip().lower())
         object.__setattr__(self, "namespace", self.namespace.strip().lower())
         object.__setattr__(self, "tags", normalize_tags(self.tags))
+        object.__setattr__(self, "upstream_urns", normalize_upstream_urns(self.upstream_urns))
         object.__setattr__(
             self,
             "custom_properties",
@@ -153,6 +180,7 @@ class DatasetMetadata(BaseModel):
         meta["urn"] = str(self.urn)
         meta["namespace"] = self.namespace
         meta["tags"] = list(self.tags)
+        meta["upstream_urns"] = list(self.upstream_urns)
         if self.owner is not None:
             meta["owner"] = self.owner
         if self.latest_schema_version is not None:
@@ -176,6 +204,7 @@ class DatasetMetadata(BaseModel):
         namespace: str = "default",
         owner: str | None = None,
         tags: list[str] | None = None,
+        upstream_urns: list[str] | None = None,
         custom_properties: dict[str, Any] | None = None,
     ) -> DatasetMetadata:
         """Create a :class:`DatasetMetadata` instance from an :class:`atlas_core.Dataset`."""
@@ -183,6 +212,9 @@ class DatasetMetadata(BaseModel):
         resolved_ns = str(raw_meta.pop("namespace", namespace))
         resolved_owner = owner if owner is not None else raw_meta.pop("owner", None)
         raw_tags = tags if tags is not None else raw_meta.pop("tags", [])
+        raw_upstream = (
+            upstream_urns if upstream_urns is not None else raw_meta.pop("upstream_urns", [])
+        )
         raw_urn = raw_meta.pop("urn", None)
         merged_props = {**raw_meta, **(custom_properties or {})}
 
@@ -197,6 +229,9 @@ class DatasetMetadata(BaseModel):
             "description": dataset.description,
             "owner": resolved_owner,
             "tags": list(raw_tags) if isinstance(raw_tags, (list, tuple)) else [],
+            "upstream_urns": (
+                list(raw_upstream) if isinstance(raw_upstream, (list, tuple)) else []
+            ),
             "custom_properties": merged_props,
         }
         if raw_urn is not None:
@@ -207,5 +242,6 @@ class DatasetMetadata(BaseModel):
 __all__ = [
     "DatasetMetadata",
     "normalize_tags",
+    "normalize_upstream_urns",
     "validate_json_value",
 ]

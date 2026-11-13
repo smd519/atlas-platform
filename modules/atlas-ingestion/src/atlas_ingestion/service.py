@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from atlas_connectors import ConnectorFactory, ConnectorRegistry
-from atlas_core import StorageProvider
+from atlas_core import MetadataProvider, StorageProvider
 from atlas_storage import StorageManager, StorageRegistry
 
 from atlas_ingestion.extraction.extractor import Extractor
@@ -33,6 +33,7 @@ class IngestionService:
         extractor: Extractor | None = None,
         loader: Loader | None = None,
         tracker: ExecutionTracker | None = None,
+        metadata_provider: MetadataProvider | None = None,
         connector_factory: ConnectorFactory | None = None,
         connector_registry: ConnectorRegistry | None = None,
         storage_manager: StorageManager | None = None,
@@ -42,6 +43,8 @@ class IngestionService:
     ) -> None:
         if pipeline is not None:
             self._pipeline = pipeline
+            if metadata_provider is not None:
+                self._pipeline._metadata = metadata_provider
         else:
             resolved_extractor = extractor or Extractor(
                 connector_factory=connector_factory,
@@ -58,6 +61,7 @@ class IngestionService:
                 extractor=resolved_extractor,
                 loader=resolved_loader,
                 tracker=resolved_tracker,
+                metadata_provider=metadata_provider,
                 workspace=workspace,
             )
 

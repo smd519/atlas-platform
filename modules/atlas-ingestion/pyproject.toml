@@ -11,6 +11,7 @@ requires-python = ">=3.12,<3.14"
 dependencies = [
     "atlas-core",
     "atlas-connectors",
+    "atlas-metadata",
     "atlas-storage",
     "pydantic>=2.14.2",
 ]

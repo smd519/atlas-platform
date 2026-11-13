@@ -1,4 +1,4 @@
-"""Coordinates ingestion extraction, loading, staging cleanup, and tracking."""
+"""Coordinates ingestion extraction, loading, metadata registration, and tracking."""
 
 from __future__ import annotations
 
@@ -9,7 +9,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from atlas_core import ExecutionStatus, get_logger
+from atlas_core import BRONZE, Artifact, ExecutionStatus, MetadataProvider, get_logger
+from atlas_metadata import ArtifactMetadata, DatasetMetadata
 
 from atlas_ingestion.exceptions import (
     ExecutionTrackingError,
@@ -44,6 +45,17 @@ def _accepts_keyword_arg(fn: Callable[..., Any], keyword: str) -> bool:
     return False
 
 
+def _extract_request_tags(request: IngestionRequest) -> list[str]:
+    """Collect and deduplicate tags from ``request.tags`` and ``request.metadata['tags']``."""
+    raw_tags: list[str] = []
+    if request.tags:
+        raw_tags.extend(str(tag).strip() for tag in request.tags if str(tag).strip())
+    meta_tags = request.metadata.get("tags")
+    if isinstance(meta_tags, (list, tuple)):
+        raw_tags.extend(str(tag).strip() for tag in meta_tags if str(tag).strip())
+    return list(dict.fromkeys(raw_tags))
+
+
 class IngestionPipeline:
     """Coordinates validation, extraction, raw layer loading, staging cleanup, and tracking.
 
@@ -66,12 +78,14 @@ class IngestionPipeline:
         loader: Loader | None = None,
         tracker: ExecutionTracker | None = None,
         *,
+        metadata_provider: MetadataProvider | None = None,
         workspace: str | Path | None = None,
         rmtree_fn: Callable[[Path], Any] | None = None,
     ) -> None:
         self._extractor = extractor or Extractor(workspace=workspace)
         self._loader = loader or Loader()
         self._tracker = tracker or ExecutionTracker()
+        self._metadata = metadata_provider
         self._rmtree_fn = rmtree_fn or shutil.rmtree
         self._logger = get_logger("atlas.ingestion.pipeline")
 
@@ -134,6 +148,14 @@ class IngestionPipeline:
                 execution_timestamp=record.started_at,
             )
 
+            if self._metadata is not None:
+                self._register_metadata(
+                    request=request,
+                    artifacts=artifacts,
+                    execution_id=exec_id,
+                    row_count=extraction_result.row_count,
+                )
+
             self._tracker.complete(
                 exec_id,
                 row_count=extraction_result.row_count,
@@ -179,6 +201,59 @@ class IngestionPipeline:
                 metadata=combined_metadata,
                 should_raise=should_raise,
             )
+
+    def _register_metadata(
+        self,
+        *,
+        request: IngestionRequest,
+        artifacts: list[Artifact],
+        execution_id: str,
+        row_count: int | None,
+    ) -> None:
+        """Register dataset and physical artifact metadata in the catalog."""
+        if self._metadata is None:
+            return
+
+        tags = _extract_request_tags(request)
+        primary_artifact = artifacts[0] if artifacts else None
+        resolved_format = (
+            primary_artifact.format if primary_artifact is not None else request.destination.format
+        )
+        resolved_path = (
+            primary_artifact.path if primary_artifact is not None else request.destination.path
+        )
+
+        dataset_meta = DatasetMetadata(
+            dataset_id=str(request.dataset_id),
+            name=str(request.dataset_id),
+            layer=BRONZE,
+            source_id=str(request.source.source_id),
+            format=resolved_format,
+            location_uri=resolved_path,
+            tags=tags,
+        )
+        self._metadata.register_dataset_metadata(dataset_meta, overwrite=True)
+
+        target_artifacts = artifacts or [
+            Artifact(
+                id=execution_id,
+                dataset_id=str(request.dataset_id),
+                path=request.destination.path,
+                format=request.destination.format,
+            )
+        ]
+        for artifact in target_artifacts:
+            artifact_meta = ArtifactMetadata(
+                artifact_id=artifact.id,
+                dataset_id=str(request.dataset_id),
+                uri=artifact.path,
+                format=artifact.format,
+                layer=BRONZE,
+                execution_id=execution_id,
+                row_count=row_count,
+                tags=tags,
+            )
+            self._metadata.register_artifact(artifact_meta, overwrite=True)
 
     def _cleanup_staging_on_success(
         self,

@@ -209,3 +209,52 @@ def test_artifact_metadata_validation_and_core_interoperability() -> None:
             format="csv",
             row_count=-5,
         )
+
+
+def test_dataset_upstream_urns_and_artifact_execution_id_serialization() -> None:
+    """DatasetMetadata.upstream_urns and ArtifactMetadata.execution_id normalize and serialize."""
+    upstream_urn_obj = URN.for_dataset("raw_orders", namespace="commerce")
+    ds = DatasetMetadata(
+        dataset_id="orders_silver",
+        namespace="commerce",
+        name="Orders Silver",
+        layer="silver",
+        format="parquet",
+        upstream_urns=[
+            str(upstream_urn_obj),
+            "  urn:atlas:dataset:commerce:raw_customers  ",
+            "urn:atlas:dataset:commerce:raw_orders",  # duplicate normalized string
+        ],
+    )
+    assert ds.upstream_urns == [
+        "urn:atlas:dataset:commerce:raw_orders",
+        "urn:atlas:dataset:commerce:raw_customers",
+    ]
+    assert all(isinstance(u, str) for u in ds.upstream_urns)
+
+    ds_payload = json.loads(ds.model_dump_json())
+    assert ds_payload["upstream_urns"] == [
+        "urn:atlas:dataset:commerce:raw_orders",
+        "urn:atlas:dataset:commerce:raw_customers",
+    ]
+
+    core_ds = ds.to_core_dataset()
+    reconstructed_ds = DatasetMetadata.from_core_dataset(core_ds)
+    assert reconstructed_ds.upstream_urns == ds.upstream_urns
+
+    art = ArtifactMetadata(
+        artifact_id="art-prov-1",
+        dataset_id="orders_silver",
+        namespace="commerce",
+        uri="data/silver/orders.parquet",
+        format="parquet",
+        layer="silver",
+        execution_id="  exec-prov-99  ",
+        row_count=42,
+    )
+    assert art.execution_id == "exec-prov-99"
+
+    art_payload = json.loads(art.model_dump_json())
+    assert art_payload["execution_id"] == "exec-prov-99"
+    assert art_payload["uri"] == "data/silver/orders.parquet"
+    assert art_payload["dataset_id"] == "orders_silver"

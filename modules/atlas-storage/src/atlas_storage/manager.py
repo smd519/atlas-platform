@@ -1,8 +1,7 @@
-"""Unified storage manager coordinating format serialization and backend persistence."""
+"""Unified storage manager coordinating format handlers and backend persistence."""
 
 from __future__ import annotations
 
-from collections.abc import Sized
 from typing import Any
 
 from atlas_core import StorageProvider
@@ -13,49 +12,59 @@ from atlas_storage.exceptions import (
     StorageReadError,
     StorageWriteError,
 )
-from atlas_storage.formats import deserialize_data, serialize_data
+from atlas_storage.handlers.registry import FormatRegistry, create_default_format_registry
 from atlas_storage.models.storage_location import StorageLocation
 from atlas_storage.models.storage_result import StorageResult
 
 
 class StorageManager:
-    """Coordinates format serialization/deserialization and physical backend persistence.
+    """Format-agnostic coordinator delegating format handling to :class:`FormatRegistry`.
 
     Architecture:
-    ``StorageManager -> Format Serializer -> Serialized Bytes -> Storage Backend``
+    ``StorageManager -> FormatRegistry -> FormatHandler -> StorageProvider``
     """
 
     def __init__(
         self,
         backend: StorageProvider,
+        format_registry: FormatRegistry | None = None,
     ) -> None:
         if not isinstance(backend, StorageProvider):
             raise StorageConfigurationError(
                 "StorageManager requires a StorageProvider instance, "
                 f"got '{type(backend).__name__}'."
             )
+        if format_registry is not None and not isinstance(format_registry, FormatRegistry):
+            raise StorageConfigurationError(
+                "StorageManager requires a FormatRegistry instance when provided, "
+                f"got '{type(format_registry).__name__}'."
+            )
         self._backend = backend
+        self._format_registry = (
+            format_registry if format_registry is not None else create_default_format_registry()
+        )
 
     @property
     def backend(self) -> StorageProvider:
         """Return the configured :class:`StorageProvider` backend."""
         return self._backend
 
+    @property
+    def format_registry(self) -> FormatRegistry:
+        """Return the configured :class:`FormatRegistry`."""
+        return self._format_registry
+
     def save(
         self,
         data: Any,
         location: StorageLocation,
     ) -> StorageResult:
-        """Serialize ``data`` according to ``location.format`` and persist via the backend."""
+        """Resolve a format handler for ``location.format`` and persist ``data``."""
         self._validate_location(location)
-        row_count = self._compute_row_count(data)
-        serialized_bytes = serialize_data(data, location.format)
+        handler = self._format_registry.get(location.format)
 
         try:
-            self._backend.save(
-                data=serialized_bytes,
-                path=location.path,
-            )
+            row_count = handler.save(data, location, self._backend)
         except StorageError:
             raise
         except Exception as exc:
@@ -71,32 +80,27 @@ class StorageManager:
         self,
         location: StorageLocation,
     ) -> Any:
-        """Load raw bytes from ``location.path`` and deserialize for ``location.format``."""
+        """Resolve a format handler for ``location.format`` and load dataset from ``location``."""
         self._validate_location(location)
+        handler = self._format_registry.get(location.format)
 
         try:
-            raw_payload = self._backend.load(
-                path=location.path,
-            )
+            return handler.load(location, self._backend)
         except StorageError:
             raise
         except Exception as exc:
             raise StorageReadError(f"Failed to read data from '{location.path}': {exc}") from exc
 
-        if isinstance(raw_payload, (bytes, bytearray)):
-            return deserialize_data(bytes(raw_payload), location.format)
-        return raw_payload
-
     def exists(
         self,
         location: StorageLocation,
     ) -> bool:
-        """Return True if ``location.path`` exists in the backend."""
+        """Resolve a format handler for ``location.format`` and check logical existence."""
         self._validate_location(location)
+        handler = self._format_registry.get(location.format)
+
         try:
-            return self._backend.exists(
-                path=location.path,
-            )
+            return handler.exists(location, self._backend)
         except StorageError:
             raise
         except Exception as exc:
@@ -110,16 +114,6 @@ class StorageManager:
             raise StorageConfigurationError(
                 f"Expected StorageLocation instance, got '{type(location).__name__}'."
             )
-
-    @staticmethod
-    def _compute_row_count(data: Any) -> int | None:
-        if data is None:
-            return None
-        if isinstance(data, (bytes, bytearray, str)):
-            return 1 if len(data) > 0 else 0
-        if isinstance(data, Sized):
-            return len(data)
-        return None
 
 
 __all__ = ["StorageManager"]

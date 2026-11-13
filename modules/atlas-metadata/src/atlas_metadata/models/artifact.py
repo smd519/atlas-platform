@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
-from atlas_core import Artifact, require_not_empty
+from atlas_core import Artifact, generate_execution_id, require_not_empty
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from atlas_metadata.exceptions import InvalidMetadataError, InvalidURNError
@@ -41,6 +41,9 @@ class ArtifactMetadata(BaseModel):
         if "uri" not in data and "path" in data:
             data = dict(data)
             data["uri"] = data.pop("path")
+        if "artifact_id" not in data and "urn" not in data:
+            data = dict(data)
+            data["artifact_id"] = generate_execution_id()
 
         raw_urn = data.get("urn")
         raw_art_id = data.get("artifact_id")
@@ -92,6 +95,18 @@ class ArtifactMetadata(BaseModel):
                 dataset_id=clean_ds,
                 artifact_id=clean_id,
             )
+
+        if self.execution_id is not None:
+            clean_exec = self.execution_id.strip() if isinstance(self.execution_id, str) else ""
+            try:
+                require_not_empty(clean_exec, "execution_id")
+            except ValueError as exc:
+                raise InvalidMetadataError(
+                    str(exc),
+                    dataset_id=clean_ds,
+                    artifact_id=clean_id,
+                ) from exc
+            object.__setattr__(self, "execution_id", clean_exec)
 
         if self.schema_version is not None and self.schema_version < 1:
             raise InvalidMetadataError(
