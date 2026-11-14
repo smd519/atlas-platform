@@ -22,7 +22,17 @@ from atlas_core.exceptions import (
     StorageError,
     ValidationError,
 )
-from atlas_core.identifiers import generate_dataset_id, generate_execution_id
+from atlas_core.identifiers import (
+    DEFAULT_NAMESPACE,
+    URN_PREFIX,
+    build_artifact_urn,
+    build_dataset_urn,
+    build_urn,
+    generate_artifact_id,
+    generate_dataset_id,
+    generate_execution_id,
+    is_canonical_urn,
+)
 from atlas_core.logging import configure_logging, get_logger
 from atlas_core.models import (
     Artifact,
@@ -45,6 +55,7 @@ __all__ = [
     "ConfigurationError",
     "Connector",
     "ConnectorError",
+    "DEFAULT_NAMESPACE",
     "Dataset",
     "DatasetId",
     "Execution",
@@ -67,12 +78,18 @@ __all__ = [
     "SourceId",
     "StorageError",
     "StorageProvider",
+    "URN_PREFIX",
     "ValidationError",
+    "build_artifact_urn",
+    "build_dataset_urn",
+    "build_urn",
     "configure_logging",
     "ensure_directory",
+    "generate_artifact_id",
     "generate_dataset_id",
     "generate_execution_id",
     "get_logger",
+    "is_canonical_urn",
     "require_not_empty",
     "settings",
 ]

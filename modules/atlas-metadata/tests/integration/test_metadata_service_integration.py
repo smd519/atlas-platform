@@ -140,3 +140,41 @@ def test_public_package_exports() -> None:
     for symbol in atlas_metadata.__all__:
         assert hasattr(atlas_metadata, symbol), f"Missing export: {symbol}"
         assert getattr(atlas_metadata, symbol) is not None
+
+
+def test_core_dataset_round_trip_overwrite_preserves_catalog_fields() -> None:
+    """get_dataset -> edit metadata -> register_dataset_metadata(overwrite) keeps other fields."""
+    service = MetadataService()
+    service.register_dataset_metadata(
+        DatasetMetadata(
+            dataset_id="orders",
+            name="orders",
+            owner="alice",
+            tags=["pii"],
+            description="Orders",
+            upstream_urns=["urn:atlas:dataset:default:raw_orders"],
+            custom_properties={"team": "data-eng"},
+        )
+    )
+    service.register_schema("orders", [{"name": "id", "data_type": "int"}])
+    before = service.get_dataset_metadata("orders")
+    assert before is not None
+    assert before.latest_schema_version == 1
+
+    core = service.get_dataset("orders")
+    assert core is not None
+    props = dict(core.metadata)
+    props["latest_quality_assessment"] = {"overall_status": "PASSED"}
+    service.register_dataset_metadata(core.model_copy(update={"metadata": props}), overwrite=True)
+
+    after = service.get_dataset_metadata("orders")
+    assert after is not None
+    assert after.latest_schema_version == 1
+    assert after.created_at == before.created_at
+    assert after.custom_properties == {
+        "team": "data-eng",
+        "latest_quality_assessment": {"overall_status": "PASSED"},
+    }
+    unchanged = DatasetMetadata.model_fields.keys() - {"custom_properties", "updated_at"}
+    for field in unchanged:
+        assert getattr(after, field) == getattr(before, field), field

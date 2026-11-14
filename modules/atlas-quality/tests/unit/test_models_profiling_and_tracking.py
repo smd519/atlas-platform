@@ -50,9 +50,9 @@ def test_quality_rule_config_validation_and_immutability() -> None:
     cfg = QualityRuleConfig(
         rule_id="completeness.not_null",
         name="Customer ID Not Null",
-        severity="warning",  # type: ignore[arg-type]
-        category="completeness",  # type: ignore[arg-type]
-        scope="column",  # type: ignore[arg-type]
+        severity="warning",
+        category="completeness",
+        scope="column",
         params={"column": "customer_id"},
         sample_limit=3,
         expose_samples=False,
@@ -62,13 +62,13 @@ def test_quality_rule_config_validation_and_immutability() -> None:
     assert cfg.scope == QualityRuleScope.COLUMN
 
     with pytest.raises(ValidationError):
-        cfg.rule_id = "mutated"  # type: ignore[misc]
+        cfg.rule_id = "mutated"
 
     with pytest.raises(QualityRuleConfigurationError, match="rule_id"):
         QualityRuleConfig(rule_id="   ")
 
     with pytest.raises(QualityRuleConfigurationError, match="severity"):
-        QualityRuleConfig(rule_id="r1", severity="fatal")  # type: ignore[arg-type]
+        QualityRuleConfig(rule_id="r1", severity="fatal")
 
     with pytest.raises(QualityRuleConfigurationError, match="sample_limit"):
         QualityRuleConfig(rule_id="r1", sample_limit=-1)

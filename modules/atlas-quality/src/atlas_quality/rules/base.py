@@ -99,7 +99,7 @@ class QualityRule(CoreQualityRule, ABC):
                 name=name or self.rule_id,
                 description=description,
                 enabled=enabled,
-                severity=resolved_sev,  # type: ignore[arg-type]
+                severity=resolved_sev,
                 category=self.default_category,
                 scope=self.default_scope,
                 params=params,

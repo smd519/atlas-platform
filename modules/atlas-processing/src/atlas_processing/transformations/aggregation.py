@@ -111,9 +111,7 @@ class AggregateTransformation(Transformation):
         parsed_specs: list[AggregationSpec] = []
         if isinstance(self._raw_aggregations, dict):
             for col, fn in self._raw_aggregations.items():
-                parsed_specs.append(
-                    AggregationSpec(column=col, function=fn)  # type: ignore[arg-type]
-                )
+                parsed_specs.append(AggregationSpec(column=col, function=fn))
         elif isinstance(self._raw_aggregations, list):
             for item in self._raw_aggregations:
                 if isinstance(item, AggregationSpec):

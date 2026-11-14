@@ -147,6 +147,15 @@ class ArtifactMetadata(BaseModel):
             dataset_id=self.dataset_id,
             path=self.uri,
             format=self.format,
+            urn=str(self.urn),
+            namespace=self.namespace,
+            layer=self.layer,
+            execution_id=self.execution_id,
+            row_count=self.row_count,
+            byte_size=self.byte_size,
+            checksum=self.checksum,
+            tags=list(self.tags),
+            metadata=dict(self.custom_properties),
         )
 
     @classmethod
@@ -154,7 +163,7 @@ class ArtifactMetadata(BaseModel):
         cls,
         artifact: Artifact,
         *,
-        namespace: str = "default",
+        namespace: str | None = None,
         layer: str | None = None,
         execution_id: str | None = None,
         schema_version: int | None = None,
@@ -165,20 +174,41 @@ class ArtifactMetadata(BaseModel):
         custom_properties: dict[str, Any] | None = None,
     ) -> ArtifactMetadata:
         """Create an :class:`ArtifactMetadata` record from an :class:`atlas_core.Artifact`."""
+        resolved_ns = (
+            namespace
+            if namespace is not None
+            else getattr(artifact, "namespace", None) or "default"
+        )
+        resolved_layer = layer if layer is not None else getattr(artifact, "layer", None)
+        resolved_exec_id = (
+            execution_id if execution_id is not None else getattr(artifact, "execution_id", None)
+        )
+        resolved_rows = row_count if row_count is not None else getattr(artifact, "row_count", None)
+        resolved_bytes = (
+            byte_size if byte_size is not None else getattr(artifact, "byte_size", None)
+        )
+        resolved_checksum = (
+            checksum if checksum is not None else getattr(artifact, "checksum", None)
+        )
+        resolved_tags = (
+            list(tags) if tags is not None else list(getattr(artifact, "tags", None) or [])
+        )
+        raw_meta = dict(getattr(artifact, "metadata", None) or {})
+        merged_props = {**raw_meta, **(custom_properties or {})}
         return cls(
             artifact_id=artifact.id,
             dataset_id=artifact.dataset_id,
-            namespace=namespace,
+            namespace=resolved_ns,
             uri=artifact.path,
             format=artifact.format,
-            layer=layer,
-            execution_id=execution_id,
+            layer=resolved_layer,
+            execution_id=resolved_exec_id,
             schema_version=schema_version,
-            row_count=row_count,
-            byte_size=byte_size,
-            checksum=checksum,
-            tags=list(tags or []),
-            custom_properties=dict(custom_properties or {}),
+            row_count=resolved_rows,
+            byte_size=resolved_bytes,
+            checksum=resolved_checksum,
+            tags=resolved_tags,
+            custom_properties=merged_props,
         )
 
 
