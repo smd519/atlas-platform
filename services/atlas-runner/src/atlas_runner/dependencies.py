@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from atlas_connectors import ConnectorRegistry, LocalFileConnector, RestConnector
-from atlas_core import StorageProvider
+from atlas_core import MetadataProvider, StorageProvider
 from atlas_ingestion import IngestionService
+from atlas_metadata import MetadataService
 from atlas_orchestration import OrchestrationDependencies, OrchestrationService
 from atlas_processing import ProcessingService
 from atlas_quality import QualityService
@@ -16,6 +17,7 @@ def build_default_dependencies(
     storage_backend: StorageProvider | None = None,
     storage_manager: StorageManager | None = None,
     connector_registry: ConnectorRegistry | None = None,
+    metadata_provider: MetadataProvider | None = None,
     ingestion_service: IngestionService | None = None,
     processing_service: ProcessingService | None = None,
     quality_service: QualityService | None = None,
@@ -30,15 +32,20 @@ def build_default_dependencies(
     if not resolved_connectors.exists("rest"):
         resolved_connectors.register("rest", RestConnector)
 
+    shared_metadata = metadata_provider if metadata_provider is not None else MetadataService()
+
     resolved_ingestion = ingestion_service or IngestionService(
         connector_registry=resolved_connectors,
         storage_manager=resolved_storage,
+        metadata_provider=shared_metadata,
     )
     resolved_processing = processing_service or ProcessingService(
         storage_manager=resolved_storage,
+        metadata_provider=shared_metadata,
     )
     resolved_quality = quality_service or QualityService(
         storage_manager=resolved_storage,
+        metadata_provider=shared_metadata,
     )
 
     return OrchestrationDependencies(
@@ -46,6 +53,7 @@ def build_default_dependencies(
         processing_service=resolved_processing,
         quality_service=resolved_quality,
         storage_provider=backend,
+        metadata_provider=shared_metadata,
     )
 
 
