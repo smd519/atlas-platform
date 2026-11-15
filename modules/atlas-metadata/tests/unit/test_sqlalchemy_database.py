@@ -52,11 +52,11 @@ def test_initialize_database_creates_tables_and_is_repeatable(tmp_path: Path) ->
 
 def test_initialize_never_resets_existing_catalog_data(tmp_path: Path) -> None:
     url = _file_url(tmp_path / "catalog.db")
-    first = SqlAlchemyMetadataRepository.from_url(url)
+    first = SqlAlchemyMetadataRepository.from_url(url, workspace_id="ws_1")
     first.save_dataset(DatasetMetadata(dataset_id="keep_me", name="Keep Me"))
     first.dispose()
 
-    second = SqlAlchemyMetadataRepository.from_url(url, initialize=True)
+    second = SqlAlchemyMetadataRepository.from_url(url, workspace_id="ws_1", initialize=True)
     try:
         assert second.get_dataset("keep_me") is not None
     finally:
@@ -65,7 +65,7 @@ def test_initialize_never_resets_existing_catalog_data(tmp_path: Path) -> None:
 
 def test_initialize_false_does_not_create_tables(tmp_path: Path) -> None:
     repo = SqlAlchemyMetadataRepository.from_url(
-        _file_url(tmp_path / "catalog.db"), initialize=False
+        _file_url(tmp_path / "catalog.db"), workspace_id="ws_1", initialize=False
     )
     try:
         assert repo.engine is not None
@@ -78,7 +78,7 @@ def test_sqlite_parent_directory_is_created_for_file_database(tmp_path: Path) ->
     db_path = tmp_path / "nested" / "metadata" / "catalog.db"
     assert not db_path.parent.exists()
 
-    repo = SqlAlchemyMetadataRepository.from_url(_file_url(db_path))
+    repo = SqlAlchemyMetadataRepository.from_url(_file_url(db_path), workspace_id="ws_1")
     try:
         repo.save_dataset(DatasetMetadata(dataset_id="d", name="D"))
         assert db_path.exists()
@@ -88,7 +88,7 @@ def test_sqlite_parent_directory_is_created_for_file_database(tmp_path: Path) ->
 
 def test_in_memory_sqlite_creates_no_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.chdir(tmp_path)
-    repo = SqlAlchemyMetadataRepository.from_url("sqlite://")
+    repo = SqlAlchemyMetadataRepository.from_url("sqlite://", workspace_id="ws_1")
     try:
         repo.save_dataset(DatasetMetadata(dataset_id="d", name="D"))
         assert repo.get_dataset("d") is not None
@@ -130,7 +130,9 @@ def test_non_sqlite_urls_do_not_apply_sqlite_configuration(
 
 
 def test_sessions_return_connections_to_pool_after_success_and_failure(tmp_path: Path) -> None:
-    repo = SqlAlchemyMetadataRepository.from_url(_file_url(tmp_path / "catalog.db"))
+    repo = SqlAlchemyMetadataRepository.from_url(
+        _file_url(tmp_path / "catalog.db"), workspace_id="ws_1"
+    )
     try:
         engine = repo.engine
         assert engine is not None
@@ -153,7 +155,9 @@ def test_failed_transaction_rolls_back_all_rows(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A failure after the schema rows are flushed leaves no partial schema or column rows."""
-    repo = SqlAlchemyMetadataRepository.from_url(_file_url(tmp_path / "catalog.db"))
+    repo = SqlAlchemyMetadataRepository.from_url(
+        _file_url(tmp_path / "catalog.db"), workspace_id="ws_1"
+    )
     try:
         repo.save_dataset(DatasetMetadata(dataset_id="d", name="D"))
 
@@ -185,7 +189,9 @@ def test_failed_transaction_rolls_back_all_rows(
 
 
 def test_repositories_satisfy_the_metadata_repository_contract(tmp_path: Path) -> None:
-    sql_repo = SqlAlchemyMetadataRepository.from_url(_file_url(tmp_path / "catalog.db"))
+    sql_repo = SqlAlchemyMetadataRepository.from_url(
+        _file_url(tmp_path / "catalog.db"), workspace_id="ws_1"
+    )
     try:
         assert isinstance(sql_repo, MetadataRepository)
         assert isinstance(InMemoryMetadataRepository(), MetadataRepository)

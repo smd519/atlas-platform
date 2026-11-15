@@ -7,6 +7,7 @@ existing repository contracts and exception semantics.
 from __future__ import annotations
 
 from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -33,7 +34,8 @@ def repo(request: pytest.FixtureRequest, tmp_path: Path) -> Iterator[MetadataRep
         yield InMemoryMetadataRepository()
         return
     sql_repo = SqlAlchemyMetadataRepository.from_url(
-        URL.create("sqlite", database=str(tmp_path / "catalog.db"))
+        URL.create("sqlite", database=str(tmp_path / "catalog.db")),
+        workspace_id="test_workspace",
     )
     try:
         yield sql_repo
@@ -108,9 +110,15 @@ def test_dataset_overwrite_preserves_created_at_and_refreshes_updated_at(
 
 
 def test_dataset_filters(repo: MetadataRepository) -> None:
+    t0 = datetime(2024, 1, 1, 0, 0, 0, tzinfo=UTC)
     repo.save_dataset(
         _dataset(
-            "orders_bronze", layer="bronze", namespace="commerce", owner="ingest", tags=["raw"]
+            "orders_bronze",
+            layer="bronze",
+            namespace="commerce",
+            owner="ingest",
+            tags=["raw"],
+            created_at=t0,
         )
     )
     repo.save_dataset(
@@ -120,10 +128,18 @@ def test_dataset_filters(repo: MetadataRepository) -> None:
             namespace="commerce",
             owner="analytics",
             tags=["curated", "orders"],
+            created_at=t0 + timedelta(seconds=1),
         )
     )
     repo.save_dataset(
-        _dataset("events", layer="bronze", namespace="telemetry", owner="ingest", tags=["orders"])
+        _dataset(
+            "events",
+            layer="bronze",
+            namespace="telemetry",
+            owner="ingest",
+            tags=["orders"],
+            created_at=t0 + timedelta(seconds=2),
+        )
     )
 
     assert [d.dataset_id for d in repo.list_datasets()] == [
@@ -247,9 +263,24 @@ def test_artifact_overwrite_replaces_only_the_same_artifact(repo: MetadataReposi
 
 
 def test_artifact_listing_filters(repo: MetadataRepository) -> None:
-    repo.save_artifact(_artifact("a1", dataset_id="orders", execution_id="exec-1"))
-    repo.save_artifact(_artifact("a2", dataset_id="orders", execution_id="exec-2"))
-    repo.save_artifact(_artifact("a3", dataset_id="events", execution_id="exec-1"))
+    t0 = datetime(2024, 1, 1, 0, 0, 0, tzinfo=UTC)
+    repo.save_artifact(_artifact("a1", dataset_id="orders", execution_id="exec-1", created_at=t0))
+    repo.save_artifact(
+        _artifact(
+            "a2",
+            dataset_id="orders",
+            execution_id="exec-2",
+            created_at=t0 + timedelta(seconds=1),
+        )
+    )
+    repo.save_artifact(
+        _artifact(
+            "a3",
+            dataset_id="events",
+            execution_id="exec-1",
+            created_at=t0 + timedelta(seconds=2),
+        )
+    )
 
     assert [a.artifact_id for a in repo.list_artifacts()] == ["a1", "a2", "a3"]
     assert [a.artifact_id for a in repo.list_artifacts(dataset_id="orders")] == ["a1", "a2"]
