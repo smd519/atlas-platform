@@ -25,7 +25,7 @@
 
 ### Dependency Rules
 
-- **Allowed dependencies**: `atlas-core`, `pydantic`
+- **Allowed dependencies**: `atlas-core`, `pydantic`, `sqlalchemy` (used only by the optional persistence backend in `repositories/sqlalchemy/`)
 - **Forbidden dependencies**: `atlas-connectors`, `atlas-storage`, `atlas-ingestion`, `atlas-processing`, `atlas-quality`, `atlas-orchestration`, `atlas-spatial`, and all services under `services/`.
 
 ---
@@ -53,7 +53,16 @@ modules/atlas-metadata/
 │       ├── repositories/
 │       │   ├── __init__.py
 │       │   ├── contracts.py
-│       │   └── memory.py
+│       │   ├── memory.py
+│       │   └── sqlalchemy/        # optional persistent backend (SQLite first)
+│       │       ├── base.py        # declarative Base, session plumbing, error translation
+│       │       ├── database.py    # engine, session factory, create_all, SQLite settings
+│       │       ├── models.py      # ORM records (infrastructure only)
+│       │       ├── mappings.py    # domain <-> ORM translation
+│       │       ├── dataset.py
+│       │       ├── schema.py
+│       │       ├── artifact.py
+│       │       └── repository.py  # unified SqlAlchemyMetadataRepository
 │       ├── catalog/
 │       │   ├── __init__.py
 │       │   └── dataset_catalog.py
@@ -160,6 +169,35 @@ artifacts = metadata_service.list_artifacts(
     execution_id="exec-ingest-001",
 )
 ```
+
+---
+
+### 3.3 Persistent Catalog with SQLAlchemy (SQLite)
+
+`MetadataService` accepts any `MetadataRepository`, so persistence is a drop-in swap. The in-memory repository remains the default.
+
+```python
+from atlas_metadata import MetadataService
+from atlas_metadata.repositories.sqlalchemy import SqlAlchemyMetadataRepository
+
+# The URL is supplied by the caller (for example from the customer workspace); nothing is hardcoded.
+repository = SqlAlchemyMetadataRepository.from_url(
+    "sqlite:////absolute/workspace/path/metadata/catalog.db"
+)
+service = MetadataService(repository=repository)
+
+# ... register datasets, schemas, artifacts; restart the process; read them back ...
+repository.dispose()  # release pooled connections on shutdown
+```
+
+- **Initialization** (`initialize=True` by default) runs `create_all`: it creates missing tables, creates the parent directory of a file-based SQLite database, and never drops, recreates, or alters existing data. There is no migration tooling yet; schema changes in this phase are handled by deliberately recreating the database file.
+- **Isolation**: Pydantic domain models never import SQLAlchemy. ORM records live in `repositories/sqlalchemy/models.py` and are translated by `mappings.py`. `import atlas_metadata` does not import SQLAlchemy.
+- **Sessions and transactions**: every repository call opens its own short-lived `Session` (`factory.begin()` for writes), so sessions are never shared across threads and connections always return to the pool.
+- **Schema version allocation**: `register_next_schema` computes `max(version) + 1` inside a transaction, backed by a unique constraint on `(namespace, dataset_id, version)`. A concurrent writer winning the same version triggers a bounded retry (`max_allocation_attempts`, default 10); other integrity errors are not retried.
+- **SQLite settings** (isolated in `database.py`): WAL journal mode, `busy_timeout`/connect timeout (`sqlite_timeout`, default 30s), foreign keys on, and `check_same_thread=False`. A private `sqlite://` in-memory database uses a single shared connection (tests/single-threaded use only).
+- **SQLite limitation**: SQLite permits one writer at a time. WAL lets readers proceed during a write and the timeout makes a second writer wait, but write throughput is serialized.
+- **PostgreSQL later**: pass a PostgreSQL URL (for example `postgresql+psycopg://user:password@host:5432/atlas`) and install the driver; no repository code changes are needed. ORM types are portable (`String`, `Text`, `Integer`, `BigInteger`, `Boolean`, `JSON`), and dataset tag filtering is done in Python because JSON-array containment is not portable SQL.
+- **Contract notes**: repository lookups take only `dataset_id` (no namespace), so `dataset_id` is treated as unique catalog-wide even though the database constraint is `(namespace, dataset_id)`. Schemas and artifacts have no foreign key to datasets because the contracts allow registering them independently of a dataset record.
 
 ---
 
