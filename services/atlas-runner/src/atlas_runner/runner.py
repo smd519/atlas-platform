@@ -2,21 +2,26 @@
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
-from atlas_core import ExecutionStatus
+from atlas_core import ExecutionStatus, MetadataProvider
 from atlas_orchestration import (
     JobResult,
     OrchestrationDependencies,
     OrchestrationService,
     WorkflowDefinition,
     WorkflowValidator,
+    WorkspaceContext,
 )
 
 from atlas_runner.config import (
     load_job_definition,
     load_workflow_definition,
+    load_workspace_config,
+    resolve_metadata_database_url,
     resolve_workspace,
     validate_workflow_dag,
 )
@@ -25,7 +30,37 @@ from atlas_runner.dependencies import (
     create_orchestration_service,
 )
 from atlas_runner.exceptions import RunnerExecutionError
-from atlas_runner.models import ValidationReport
+from atlas_runner.models import MetadataConfig, ValidationReport, WorkspaceConfig
+
+
+def _invoke_dependency_factory(
+    factory: Callable[..., OrchestrationDependencies],
+    *,
+    workspace: WorkspaceContext | None = None,
+    workspace_config: WorkspaceConfig | None = None,
+    metadata_config: MetadataConfig | None = None,
+    metadata_provider: MetadataProvider | None = None,
+) -> OrchestrationDependencies:
+    """Invoke ``factory`` passing any supported workspace/metadata keyword arguments."""
+    available_kwargs: dict[str, Any] = {
+        "workspace": workspace,
+        "workspace_config": workspace_config,
+        "metadata_config": metadata_config,
+        "metadata_provider": metadata_provider,
+    }
+    try:
+        sig = inspect.signature(factory)
+    except (TypeError, ValueError):
+        return factory()
+
+    accepts_var_kw = any(
+        param.kind == inspect.Parameter.VAR_KEYWORD for param in sig.parameters.values()
+    )
+    if accepts_var_kw:
+        return factory(**available_kwargs)
+
+    filtered_kwargs = {key: val for key, val in available_kwargs.items() if key in sig.parameters}
+    return factory(**filtered_kwargs)
 
 
 class AtlasRunner:
@@ -36,13 +71,15 @@ class AtlasRunner:
         *,
         orchestration_service: OrchestrationService | None = None,
         dependencies: OrchestrationDependencies | None = None,
-        dependency_factory: Callable[[], OrchestrationDependencies] | None = None,
+        metadata_provider: MetadataProvider | None = None,
+        dependency_factory: Callable[..., OrchestrationDependencies] | None = None,
         orchestration_factory: (
             Callable[[OrchestrationDependencies], OrchestrationService] | None
         ) = None,
     ) -> None:
         self._injected_orchestrator = orchestration_service
         self._injected_dependencies = dependencies
+        self._injected_metadata_provider = metadata_provider
         self._dependency_factory = dependency_factory or build_default_dependencies
         self._orchestration_factory = orchestration_factory or create_orchestration_service
         self._last_dependencies: OrchestrationDependencies | None = None
@@ -78,8 +115,28 @@ class AtlasRunner:
         """
         workspace_context = resolve_workspace(workspace, field="workspace")
         workspace_root = workspace_context.root_path
+        workspace_config, ws_cfg_path = load_workspace_config(workspace_context)
         job_def, resolved_job_path = load_job_definition(workspace_root, job_path)
         self._last_job_id = job_def.job_id
+
+        effective_metadata = (
+            job_def.metadata
+            if "metadata" in job_def.model_fields_set
+            else workspace_config.metadata
+        )
+        if effective_metadata.backend == "sqlalchemy" and effective_metadata.database_url:
+            meta_cfg_file = (
+                resolved_job_path
+                if "metadata" in job_def.model_fields_set
+                else (ws_cfg_path or resolved_job_path)
+            )
+            resolve_metadata_database_url(
+                effective_metadata.database_url,
+                workspace=workspace_context,
+                create_dirs=False,
+                config_file=meta_cfg_file,
+                field="metadata.database_url",
+            )
 
         workflows: list[WorkflowDefinition] = []
         workflow_files: list[Path] = []
@@ -124,17 +181,33 @@ class AtlasRunner:
 
     def _build_execution_runtime(
         self,
+        *,
+        workspace: WorkspaceContext | None = None,
+        workspace_config: WorkspaceConfig | None = None,
+        metadata_config: MetadataConfig | None = None,
     ) -> tuple[OrchestrationDependencies, OrchestrationService]:
         """Instantiate a fresh dependency graph and orchestration service for a single run."""
         if self._injected_orchestrator is not None:
             deps = self._injected_dependencies or self._injected_orchestrator.dependencies
             return deps, self._injected_orchestrator
 
-        deps = (
-            self._injected_dependencies
-            if self._injected_dependencies is not None
-            else self._dependency_factory()
-        )
+        if self._injected_dependencies is not None:
+            deps = self._injected_dependencies
+        elif self._dependency_factory is build_default_dependencies:
+            deps = build_default_dependencies(
+                workspace=workspace,
+                workspace_config=workspace_config,
+                metadata_config=metadata_config,
+                metadata_provider=self._injected_metadata_provider,
+            )
+        else:
+            deps = _invoke_dependency_factory(
+                self._dependency_factory,
+                workspace=workspace,
+                workspace_config=workspace_config,
+                metadata_config=metadata_config,
+                metadata_provider=self._injected_metadata_provider,
+            )
         orchestrator = self._orchestration_factory(deps)
         return deps, orchestrator
 
@@ -147,9 +220,16 @@ class AtlasRunner:
     ) -> JobResult:
         """Assemble Job workflows, build a fresh dependency graph, and hand off to orchestration."""
         workspace_context = resolve_workspace(workspace, field="workspace")
+        workspace_config, _ = load_workspace_config(workspace_context)
 
         job_def, resolved_job_path = load_job_definition(workspace_context.root_path, job_path)
         self._last_job_id = job_def.job_id
+
+        effective_metadata = (
+            job_def.metadata
+            if "metadata" in job_def.model_fields_set
+            else workspace_config.metadata
+        )
 
         workflows: list[WorkflowDefinition] = []
         for wf_ref in job_def.workflows:
@@ -163,7 +243,11 @@ class AtlasRunner:
             validate_workflow_dag(workflow_def, config_file=resolved_wf_path)
             workflows.append(workflow_def)
 
-        deps, orchestrator = self._build_execution_runtime()
+        deps, orchestrator = self._build_execution_runtime(
+            workspace=workspace_context,
+            workspace_config=workspace_config,
+            metadata_config=effective_metadata,
+        )
         self._last_dependencies = deps
         self._last_orchestrator = orchestrator
 
