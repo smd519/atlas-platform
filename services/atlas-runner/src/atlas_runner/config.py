@@ -22,7 +22,7 @@ from atlas_orchestration import (
 from pydantic import ValidationError
 
 from atlas_runner.exceptions import RunnerConfigurationError, WorkspaceIsolationError
-from atlas_runner.models import JobDefinition
+from atlas_runner.models import JobDefinition, WorkspaceConfig
 
 
 def resolve_workspace(
@@ -732,14 +732,221 @@ def validate_workflow_dag(
         raise
 
 
+def _resolve_optional_workspace_root(
+    workspace: str | Path | WorkspaceContext | None,
+    *,
+    config_file: str | Path | None = None,
+) -> Path | None:
+    """Return the resolved absolute workspace root path if available."""
+    if isinstance(workspace, WorkspaceContext):
+        return workspace.root_path.resolve()
+    if workspace is not None:
+        ws_ctx = resolve_workspace(workspace, config_file=config_file, field="workspace")
+        return ws_ctx.root_path.resolve()
+    atlas_ws_env = os.environ.get("ATLAS_WORKSPACE", "").strip()
+    if atlas_ws_env:
+        return Path(atlas_ws_env).expanduser().resolve()
+    return None
+
+
+def load_workspace_config(
+    workspace: str | Path | WorkspaceContext,
+) -> tuple[WorkspaceConfig, Path | None]:
+    """Load and validate optional ``workspace.yml`` / ``workspace.yaml`` from ``workspace``.
+
+    If no workspace configuration file is present, returns a default :class:`WorkspaceConfig`
+    and ``None``.
+    """
+    ws_ctx = (
+        workspace
+        if isinstance(workspace, WorkspaceContext)
+        else resolve_workspace(workspace, field="workspace")
+    )
+    workspace_root = ws_ctx.root_path
+
+    for filename in ("workspace.yml", "workspace.yaml"):
+        candidate = resolve_workspace_path(
+            workspace_root,
+            filename,
+            field="workspace_config",
+        )
+        if candidate.exists() and candidate.is_file():
+            raw_cfg = load_yaml_file(candidate)
+            try:
+                ws_cfg = WorkspaceConfig.model_validate(raw_cfg)
+            except ValidationError as exc:
+                err_field = (
+                    _format_pydantic_loc(exc.errors()[0].get("loc", ())) if exc.errors() else "root"
+                )
+                _annotate_exception(exc, config_file=candidate, field=err_field)
+                raise
+            return ws_cfg, candidate
+
+    return WorkspaceConfig(), None
+
+
+def resolve_metadata_database_path(
+    database_url: str,
+    workspace: str | Path | WorkspaceContext | None = None,
+    *,
+    create_dirs: bool = True,
+    config_file: str | Path | None = None,
+    field: str = "metadata.database_url",
+) -> Path | None:
+    """Resolve the SQLite filesystem :class:`Path` from ``database_url`` against ``workspace``.
+
+    Returns ``None`` for in-memory SQLite URLs (e.g. ``sqlite:///:memory:``).
+    """
+    cfg_str = str(config_file) if config_file is not None else None
+    raw_url = database_url.strip() if isinstance(database_url, str) else ""
+    if not raw_url:
+        raise RunnerConfigurationError(
+            "Metadata database_url must not be empty when backend is 'sqlalchemy'.",
+            config_file=cfg_str,
+            field=field,
+        )
+
+    if not raw_url.lower().startswith("sqlite:"):
+        raise RunnerConfigurationError(
+            f"Unsupported metadata database_url '{raw_url}': only SQLite ('sqlite:///...') "
+            "database URLs are supported.",
+            config_file=cfg_str,
+            field=field,
+        )
+
+    url_part, _, query_part = raw_url.partition("?")
+    lower_url_part = url_part.lower()
+
+    if (
+        lower_url_part in ("sqlite:", "sqlite://", "sqlite:///:memory:", "sqlite::memory:")
+        or "mode=memory" in query_part.lower()
+    ):
+        return None
+
+    if lower_url_part.startswith("sqlite://") and not lower_url_part.startswith("sqlite:///"):
+        raise RunnerConfigurationError(
+            f"Invalid SQLite database_url '{raw_url}': expected 'sqlite:///<path>'.",
+            config_file=cfg_str,
+            field=field,
+        )
+
+    if lower_url_part.startswith("sqlite:///"):
+        raw_path_str = url_part[len("sqlite:///") :]
+    else:
+        raw_path_str = url_part[len("sqlite:") :]
+
+    if not raw_path_str.strip():
+        raise RunnerConfigurationError(
+            f"Invalid SQLite database_url '{raw_url}': database file path is empty.",
+            config_file=cfg_str,
+            field=field,
+        )
+
+    workspace_root = _resolve_optional_workspace_root(workspace, config_file=config_file)
+    has_workspace_placeholder = "{workspace}" in raw_path_str
+
+    if has_workspace_placeholder:
+        if workspace_root is None:
+            raise RunnerConfigurationError(
+                "Cannot resolve '{workspace}' in metadata.database_url: no workspace was "
+                "provided and environment variable 'ATLAS_WORKSPACE' is not set.",
+                config_file=cfg_str,
+                field=field,
+            )
+        normalized_template = raw_path_str
+        while normalized_template.startswith(("/{workspace}", "\\{workspace}")):
+            normalized_template = normalized_template[1:]
+        substituted = normalized_template.replace("{workspace}", str(workspace_root))
+        candidate_path = Path(substituted)
+    else:
+        cleaned_path_str = raw_path_str
+        if (
+            len(cleaned_path_str) >= 3
+            and cleaned_path_str[0] in ("/", "\\")
+            and cleaned_path_str[1].isalpha()
+            and cleaned_path_str[2] == ":"
+        ):
+            cleaned_path_str = cleaned_path_str[1:]
+        candidate_path = Path(cleaned_path_str)
+
+    if ".." in candidate_path.parts:
+        raise WorkspaceIsolationError(
+            f"Workspace isolation violation: path traversal segment '..' is not allowed "
+            f"in '{field}' ('{raw_url}').",
+            config_file=cfg_str,
+            field=field,
+            offending_path=raw_url,
+            workspace=str(workspace_root) if workspace_root is not None else None,
+        )
+
+    is_relative = not candidate_path.is_absolute()
+    if is_relative:
+        if workspace_root is None:
+            raise RunnerConfigurationError(
+                f"Cannot resolve relative SQLite database path '{raw_path_str}' in "
+                "metadata.database_url without an active workspace or 'ATLAS_WORKSPACE'.",
+                config_file=cfg_str,
+                field=field,
+            )
+        resolved_db_path = (workspace_root / candidate_path).resolve()
+    else:
+        resolved_db_path = candidate_path.resolve()
+
+    if workspace_root is not None and (has_workspace_placeholder or is_relative):
+        if not resolved_db_path.is_relative_to(workspace_root):
+            raise WorkspaceIsolationError(
+                f"Workspace isolation violation: metadata database path '{resolved_db_path}' "
+                f"escapes workspace boundary '{workspace_root}'.",
+                config_file=cfg_str,
+                field=field,
+                offending_path=raw_url,
+                workspace=str(workspace_root),
+            )
+
+    if create_dirs:
+        resolved_db_path.parent.mkdir(parents=True, exist_ok=True)
+
+    return resolved_db_path
+
+
+def resolve_metadata_database_url(
+    database_url: str,
+    workspace: str | Path | WorkspaceContext | None = None,
+    *,
+    create_dirs: bool = True,
+    config_file: str | Path | None = None,
+    field: str = "metadata.database_url",
+) -> str:
+    """Resolve ``{workspace}`` and relative SQLite paths in ``database_url`` to an absolute URL."""
+    resolved_path = resolve_metadata_database_path(
+        database_url,
+        workspace=workspace,
+        create_dirs=create_dirs,
+        config_file=config_file,
+        field=field,
+    )
+    if resolved_path is None:
+        raw_stripped = database_url.strip()
+        if raw_stripped.lower() == "sqlite:":
+            return "sqlite:///:memory:"
+        return raw_stripped
+
+    _, sep, query_part = database_url.strip().partition("?")
+    query_suffix = f"?{query_part}" if sep else ""
+    return f"sqlite:///{resolved_path.as_posix()}{query_suffix}"
+
+
 __all__ = [
     "apply_job_parameters_to_workflow_data",
     "extract_error_context",
     "load_job_definition",
     "load_workflow_definition",
+    "load_workspace_config",
     "load_yaml_file",
     "merge_parameters",
     "resolve_job_reference",
+    "resolve_metadata_database_path",
+    "resolve_metadata_database_url",
     "resolve_step_paths",
     "resolve_workflow_reference",
     "resolve_workspace",

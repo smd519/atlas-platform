@@ -175,12 +175,14 @@ source = { editable = "modules/atlas-metadata" }
 dependencies = [
     { name = "atlas-core" },
     { name = "pydantic" },
+    { name = "sqlalchemy" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "atlas-core", editable = "modules/atlas-core" },
     { name = "pydantic", specifier = ">=2.14.2" },
+    { name = "sqlalchemy", specifier = ">=2.1.6" },
 ]
 
 [[package]]

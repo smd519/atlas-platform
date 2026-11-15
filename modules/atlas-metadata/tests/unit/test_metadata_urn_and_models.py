@@ -153,10 +153,10 @@ def test_schema_and_column_metadata_immutability_and_validation() -> None:
 
     # Immutability check on SchemaMetadata and ColumnMetadata
     with pytest.raises(ValidationError):
-        schema.version = 2  # type: ignore[misc]
+        schema.version = 2
 
     with pytest.raises(ValidationError):
-        col1.name = "mutated"  # type: ignore[misc]
+        col1.name = "mutated"
 
     # Duplicate columns rejected
     with pytest.raises(InvalidSchemaError, match="Duplicate column name"):
