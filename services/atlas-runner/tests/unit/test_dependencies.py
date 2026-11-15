@@ -177,6 +177,7 @@ def test_sqlalchemy_configuration_creates_persistent_sqlite_repository_and_share
 
     assert isinstance(shared_metadata, MetadataService)
     assert isinstance(shared_metadata.repository, SqlAlchemyMetadataRepository)
+    assert shared_metadata.repository.workspace_id == "customer_alpha"
 
     assert isinstance(deps.ingestion_service, IngestionService)
     assert isinstance(deps.processing_service, ProcessingService)
