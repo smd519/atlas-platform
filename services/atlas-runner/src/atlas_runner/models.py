@@ -4,11 +4,74 @@ from __future__ import annotations
 
 import copy
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from atlas_core import require_not_empty
 from atlas_orchestration import WorkflowDefinition
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+SUPPORTED_METADATA_BACKENDS = ("memory", "sqlalchemy")
+MetadataBackend = Literal["memory", "sqlalchemy"]
+
+
+class MetadataConfig(BaseModel):
+    """Metadata persistence configuration for a workspace or job."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    backend: MetadataBackend = "memory"
+    database_url: str | None = None
+
+    @field_validator("backend", mode="before")
+    @classmethod
+    def _validate_backend(cls, value: Any) -> str:
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(
+                f"Unsupported metadata backend {value!r}. "
+                f"Supported backends: {', '.join(SUPPORTED_METADATA_BACKENDS)}."
+            )
+        cleaned = value.strip().lower()
+        if cleaned not in SUPPORTED_METADATA_BACKENDS:
+            raise ValueError(
+                f"Unsupported metadata backend '{value}'. "
+                f"Supported backends: {', '.join(SUPPORTED_METADATA_BACKENDS)}."
+            )
+        return cleaned
+
+    @field_validator("database_url", mode="before")
+    @classmethod
+    def _validate_database_url(cls, value: Any) -> str | None:
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            raise ValueError("metadata.database_url must be a non-empty string.")
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("metadata.database_url must not be empty.")
+        return cleaned
+
+    @model_validator(mode="after")
+    def _validate_sqlalchemy_requirements(self) -> MetadataConfig:
+        if self.backend == "sqlalchemy" and not self.database_url:
+            raise ValueError(
+                "metadata.database_url is required when metadata.backend is 'sqlalchemy'."
+            )
+        return self
+
+
+class WorkspaceConfig(BaseModel):
+    """Workspace-level configuration (e.g. workspace.yml)."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    metadata: MetadataConfig = Field(default_factory=MetadataConfig)
+
+    @field_validator("metadata", mode="before")
+    @classmethod
+    def _coerce_metadata(cls, value: Any) -> Any:
+        if value is None:
+            return MetadataConfig()
+        return value
 
 
 class JobDefinition(BaseModel):
@@ -22,13 +85,20 @@ class JobDefinition(BaseModel):
     workflows: list[str] = Field(default_factory=list)
     workflow_ref: str | None = None
     parameters: dict[str, Any] = Field(default_factory=dict)
-    metadata: dict[str, Any] = Field(default_factory=dict)
+    metadata: MetadataConfig = Field(default_factory=MetadataConfig)
 
-    @field_validator("parameters", "metadata", mode="before")
+    @field_validator("parameters", mode="before")
     @classmethod
     def _coerce_empty_dict(cls, value: Any) -> Any:
         if value is None:
             return {}
+        return value
+
+    @field_validator("metadata", mode="before")
+    @classmethod
+    def _coerce_metadata(cls, value: Any) -> Any:
+        if value is None:
+            return MetadataConfig()
         return value
 
     @model_validator(mode="before")
@@ -130,5 +200,9 @@ JobManifest = JobDefinition
 __all__ = [
     "JobDefinition",
     "JobManifest",
+    "MetadataBackend",
+    "MetadataConfig",
+    "SUPPORTED_METADATA_BACKENDS",
     "ValidationReport",
+    "WorkspaceConfig",
 ]

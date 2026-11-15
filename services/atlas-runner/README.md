@@ -12,7 +12,7 @@ Before execution, it initializes and injects all platform dependencies (`atlas-i
 ## CLI Usage
 
 ```powershell
-uv run atlas-runner --workspace D:\WORK-SPACE\ATLAS-WORKSPACE --job jobs/corporations.yml
+uv run atlas-runner --workspace D:\WORK-SPACE\ATLAS-WORKSPACE\customer_001 --job morning_batch
 ```
 
 ## Parameter Merge Strategy
