@@ -22,8 +22,15 @@ from atlas_metadata.repositories.sqlalchemy.models import (
 # ----------------------------------------------------------------------
 
 
-def apply_dataset_to_record(record: DatasetRecord, dataset: DatasetMetadata) -> DatasetRecord:
+def apply_dataset_to_record(
+    record: DatasetRecord,
+    dataset: DatasetMetadata,
+    *,
+    workspace_id: str | None = None,
+) -> DatasetRecord:
     """Copy every :class:`DatasetMetadata` field onto ``record`` (in place) and return it."""
+    if workspace_id is not None:
+        record.workspace_id = workspace_id
     record.dataset_id = dataset.dataset_id
     record.urn = str(dataset.urn)
     record.name = dataset.name
@@ -70,9 +77,10 @@ def record_to_dataset(record: DatasetRecord) -> DatasetMetadata:
 # ----------------------------------------------------------------------
 
 
-def schema_to_record(schema: SchemaMetadata) -> SchemaRecord:
+def schema_to_record(schema: SchemaMetadata, *, workspace_id: str) -> SchemaRecord:
     """Build a new :class:`SchemaRecord` (with ordered column rows) from ``schema``."""
     record = SchemaRecord(
+        workspace_id=workspace_id,
         schema_id=schema.schema_id,
         urn=str(schema.urn),
         dataset_id=schema.dataset_id,
@@ -86,6 +94,8 @@ def schema_to_record(schema: SchemaMetadata) -> SchemaRecord:
     )
     record.columns = [
         SchemaColumnRecord(
+            workspace_id=workspace_id,
+            schema_id=schema.schema_id,
             position=position,
             name=column.name,
             data_type=column.data_type,
@@ -136,8 +146,15 @@ def record_to_schema(record: SchemaRecord) -> SchemaMetadata:
 # ----------------------------------------------------------------------
 
 
-def apply_artifact_to_record(record: ArtifactRecord, artifact: ArtifactMetadata) -> ArtifactRecord:
+def apply_artifact_to_record(
+    record: ArtifactRecord,
+    artifact: ArtifactMetadata,
+    *,
+    workspace_id: str | None = None,
+) -> ArtifactRecord:
     """Copy every :class:`ArtifactMetadata` field onto ``record`` (in place) and return it."""
+    if workspace_id is not None:
+        record.workspace_id = workspace_id
     record.artifact_id = artifact.artifact_id
     record.urn = str(artifact.urn)
     record.dataset_id = artifact.dataset_id

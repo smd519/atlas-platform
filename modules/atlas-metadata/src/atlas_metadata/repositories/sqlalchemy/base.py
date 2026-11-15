@@ -53,7 +53,7 @@ def translate_database_errors(operation: str) -> Iterator[None]:
 
 
 class SqlAlchemyRepositoryBase:
-    """Holds the session factory shared by the dataset, schema, and artifact repositories.
+    """Holds the session factory and workspace scope shared by SQLAlchemy repositories.
 
     Every repository method opens its own short-lived :class:`Session` from the factory (reads
     with ``with factory() as session``; writes with ``with factory.begin() as session``), so a
@@ -61,8 +61,16 @@ class SqlAlchemyRepositoryBase:
     returned to the pool when the operation ends.
     """
 
-    def __init__(self, session_factory: SessionFactory) -> None:
+    def __init__(self, session_factory: SessionFactory, *, workspace_id: str) -> None:
+        if not isinstance(workspace_id, str) or not workspace_id.strip():
+            raise ValueError("workspace_id must be a non-empty string.")
         self._session_factory = session_factory
+        self._workspace_id = workspace_id.strip()
+
+    @property
+    def workspace_id(self) -> str:
+        """Return the logical workspace identifier scoped to this repository instance."""
+        return self._workspace_id
 
 
 __all__ = [

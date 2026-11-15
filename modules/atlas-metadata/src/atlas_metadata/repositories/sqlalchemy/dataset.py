@@ -43,9 +43,17 @@ class SqlAlchemyDatasetRepository(SqlAlchemyRepositoryBase, DatasetRepository):
                 self._session_factory.begin() as session,
             ):
                 existing = session.scalar(
-                    select(DatasetRecord).where(DatasetRecord.dataset_id == dataset.dataset_id)
+                    select(DatasetRecord).where(
+                        DatasetRecord.workspace_id == self._workspace_id,
+                        DatasetRecord.dataset_id == dataset.dataset_id,
+                    )
                 )
-                urn_owner = session.scalar(select(DatasetRecord).where(DatasetRecord.urn == urn))
+                urn_owner = session.scalar(
+                    select(DatasetRecord).where(
+                        DatasetRecord.workspace_id == self._workspace_id,
+                        DatasetRecord.urn == urn,
+                    )
+                )
 
                 if (existing is not None or urn_owner is not None) and not overwrite:
                     raise self._duplicate_dataset(dataset)
@@ -55,12 +63,12 @@ class SqlAlchemyDatasetRepository(SqlAlchemyRepositoryBase, DatasetRepository):
 
                 if existing is None:
                     record = DatasetRecord()
-                    apply_dataset_to_record(record, dataset)
+                    apply_dataset_to_record(record, dataset, workspace_id=self._workspace_id)
                     session.add(record)
                 else:
                     record = existing
                     created_at = existing.created_at
-                    apply_dataset_to_record(record, dataset)
+                    apply_dataset_to_record(record, dataset, workspace_id=self._workspace_id)
                     record.created_at = created_at
                     record.updated_at = datetime.now(UTC)
 
@@ -72,14 +80,22 @@ class SqlAlchemyDatasetRepository(SqlAlchemyRepositoryBase, DatasetRepository):
     def get_dataset(self, dataset_id: str) -> DatasetMetadata | None:
         with translate_database_errors("get_dataset"), self._session_factory() as session:
             record = session.scalar(
-                select(DatasetRecord).where(DatasetRecord.dataset_id == dataset_id.strip())
+                select(DatasetRecord).where(
+                    DatasetRecord.workspace_id == self._workspace_id,
+                    DatasetRecord.dataset_id == dataset_id.strip(),
+                )
             )
             return record_to_dataset(record) if record is not None else None
 
     def get_dataset_by_urn(self, urn: URN | str) -> DatasetMetadata | None:
         parsed = URN.parse(urn)
         with translate_database_errors("get_dataset_by_urn"), self._session_factory() as session:
-            record = session.scalar(select(DatasetRecord).where(DatasetRecord.urn == str(parsed)))
+            record = session.scalar(
+                select(DatasetRecord).where(
+                    DatasetRecord.workspace_id == self._workspace_id,
+                    DatasetRecord.urn == str(parsed),
+                )
+            )
             return record_to_dataset(record) if record is not None else None
 
     def list_datasets(
@@ -90,7 +106,11 @@ class SqlAlchemyDatasetRepository(SqlAlchemyRepositoryBase, DatasetRepository):
         tag: str | None = None,
         owner: str | None = None,
     ) -> list[DatasetMetadata]:
-        statement = select(DatasetRecord).order_by(DatasetRecord.id)
+        statement = (
+            select(DatasetRecord)
+            .where(DatasetRecord.workspace_id == self._workspace_id)
+            .order_by(DatasetRecord.created_at, DatasetRecord.dataset_id)
+        )
         if layer is not None:
             statement = statement.where(DatasetRecord.layer == layer.strip().lower())
         if namespace is not None:
@@ -110,7 +130,10 @@ class SqlAlchemyDatasetRepository(SqlAlchemyRepositoryBase, DatasetRepository):
     def delete_dataset(self, dataset_id: str) -> bool:
         with translate_database_errors("delete_dataset"), self._session_factory.begin() as session:
             record = session.scalar(
-                select(DatasetRecord).where(DatasetRecord.dataset_id == dataset_id.strip())
+                select(DatasetRecord).where(
+                    DatasetRecord.workspace_id == self._workspace_id,
+                    DatasetRecord.dataset_id == dataset_id.strip(),
+                )
             )
             if record is None:
                 return False
