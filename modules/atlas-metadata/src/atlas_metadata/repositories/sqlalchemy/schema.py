@@ -50,7 +50,7 @@ class SqlAlchemySchemaRepository(SqlAlchemyRepositoryBase, SchemaRepository):
 
     def save_schema(self, schema: SchemaMetadata) -> SchemaMetadata:
         try:
-            with translate_database_errors("save_schema"), self._session_factory.begin() as session:
+            with translate_database_errors("save_schema"), self._write_session() as session:
                 self._insert_schema(session, schema)
         except IntegrityError as exc:
             raise self._schema_conflict(schema) from exc
@@ -73,7 +73,7 @@ class SqlAlchemySchemaRepository(SqlAlchemyRepositoryBase, SchemaRepository):
             try:
                 with (
                     translate_database_errors("register_next_schema"),
-                    self._session_factory.begin() as session,
+                    self._write_session() as session,
                 ):
                     current = session.scalar(
                         select(func.max(SchemaRecord.version)).where(
@@ -125,13 +125,13 @@ class SqlAlchemySchemaRepository(SqlAlchemyRepositoryBase, SchemaRepository):
             statement = statement.where(SchemaRecord.version == version)
         statement = statement.order_by(SchemaRecord.version.desc(), SchemaRecord.namespace).limit(1)
 
-        with translate_database_errors("get_schema"), self._session_factory() as session:
+        with translate_database_errors("get_schema"), self._read_session() as session:
             record = session.scalar(statement)
             return record_to_schema(record) if record is not None else None
 
     def get_schema_by_urn(self, urn: URN | str) -> SchemaMetadata | None:
         parsed = URN.parse(urn)
-        with translate_database_errors("get_schema_by_urn"), self._session_factory() as session:
+        with translate_database_errors("get_schema_by_urn"), self._read_session() as session:
             record = session.scalar(
                 select(SchemaRecord).where(
                     SchemaRecord.workspace_id == self._workspace_id,
@@ -149,7 +149,7 @@ class SqlAlchemySchemaRepository(SqlAlchemyRepositoryBase, SchemaRepository):
             )
             .order_by(SchemaRecord.version, SchemaRecord.namespace)
         )
-        with translate_database_errors("list_schemas"), self._session_factory() as session:
+        with translate_database_errors("list_schemas"), self._read_session() as session:
             return [record_to_schema(record) for record in session.scalars(statement)]
 
     # ------------------------------------------------------------------
@@ -191,7 +191,7 @@ class SqlAlchemySchemaRepository(SqlAlchemyRepositoryBase, SchemaRepository):
             dataset.updated_at = datetime.now(UTC)
 
     def _version_exists(self, dataset_id: str, version: int) -> bool:
-        with translate_database_errors("schema_version_exists"), self._session_factory() as session:
+        with translate_database_errors("schema_version_exists"), self._read_session() as session:
             found = session.scalar(
                 select(SchemaRecord.schema_id)
                 .where(

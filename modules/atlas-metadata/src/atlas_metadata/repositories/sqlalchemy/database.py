@@ -21,11 +21,13 @@ from typing import Any
 
 from sqlalchemy import Engine, create_engine, event
 from sqlalchemy.engine import URL, make_url
-from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from atlas_metadata.repositories.sqlalchemy import models as _models  # noqa: F401  (registers tables)
 from atlas_metadata.repositories.sqlalchemy.base import Base
+from atlas_metadata.repositories.sqlalchemy.events import register_session_events
+from atlas_metadata.repositories.sqlalchemy.session import MetadataSession
 
 DEFAULT_SQLITE_TIMEOUT_SECONDS = 30.0
 
@@ -48,13 +50,15 @@ def create_metadata_engine(
     return create_engine(url, echo=echo, **engine_kwargs)
 
 
-def create_session_factory(engine: Engine) -> sessionmaker[Session]:
-    """Return a session factory bound to ``engine``.
+def create_session_factory(engine: Engine) -> sessionmaker[MetadataSession]:
+    """Return a :class:`MetadataSession` factory bound to ``engine`` with ownership checks.
 
     ``expire_on_commit=False`` lets repositories map records to domain models after commit
     without triggering extra queries. Sessions are short-lived and never shared.
     """
-    return sessionmaker(bind=engine, expire_on_commit=False)
+    factory = sessionmaker(bind=engine, class_=MetadataSession, expire_on_commit=False)
+    register_session_events(factory)
+    return factory
 
 
 def initialize_database(engine: Engine) -> None:

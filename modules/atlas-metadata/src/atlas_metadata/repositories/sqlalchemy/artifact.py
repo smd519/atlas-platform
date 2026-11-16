@@ -37,7 +37,7 @@ class SqlAlchemyArtifactRepository(SqlAlchemyRepositoryBase, ArtifactRepository)
         try:
             with (
                 translate_database_errors("save_artifact"),
-                self._session_factory.begin() as session,
+                self._write_session() as session,
             ):
                 existing = session.scalar(
                     select(ArtifactRecord).where(
@@ -71,7 +71,7 @@ class SqlAlchemyArtifactRepository(SqlAlchemyRepositoryBase, ArtifactRepository)
         return artifact
 
     def get_artifact(self, artifact_id: str) -> ArtifactMetadata | None:
-        with translate_database_errors("get_artifact"), self._session_factory() as session:
+        with translate_database_errors("get_artifact"), self._read_session() as session:
             record = session.scalar(
                 select(ArtifactRecord).where(
                     ArtifactRecord.workspace_id == self._workspace_id,
@@ -82,7 +82,7 @@ class SqlAlchemyArtifactRepository(SqlAlchemyRepositoryBase, ArtifactRepository)
 
     def get_artifact_by_urn(self, urn: URN | str) -> ArtifactMetadata | None:
         parsed = URN.parse(urn)
-        with translate_database_errors("get_artifact_by_urn"), self._session_factory() as session:
+        with translate_database_errors("get_artifact_by_urn"), self._read_session() as session:
             record = session.scalar(
                 select(ArtifactRecord).where(
                     ArtifactRecord.workspace_id == self._workspace_id,
@@ -107,7 +107,7 @@ class SqlAlchemyArtifactRepository(SqlAlchemyRepositoryBase, ArtifactRepository)
         if execution_id is not None:
             statement = statement.where(ArtifactRecord.execution_id == execution_id.strip())
 
-        with translate_database_errors("list_artifacts"), self._session_factory() as session:
+        with translate_database_errors("list_artifacts"), self._read_session() as session:
             return [record_to_artifact(record) for record in session.scalars(statement)]
 
     @staticmethod

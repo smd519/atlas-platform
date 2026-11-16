@@ -22,9 +22,12 @@ from atlas_metadata import (
 )
 from atlas_metadata.repositories.sqlalchemy import (
     Base,
+    MetadataSession,
     SqlAlchemyMetadataRepository,
     SqlAlchemySchemaRepository,
     TenantOwnedMixin,
+    create_session_factory,
+    validate_workspace_ownership,
 )
 from atlas_metadata.repositories.sqlalchemy.models import (
     ArtifactRecord,
@@ -32,10 +35,10 @@ from atlas_metadata.repositories.sqlalchemy.models import (
     SchemaColumnRecord,
     SchemaRecord,
 )
-from sqlalchemy import String, inspect, select, text
+from sqlalchemy import String, event, inspect, select, text
 from sqlalchemy.engine import URL
 from sqlalchemy.exc import IntegrityError, OperationalError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
 from sqlalchemy.pool import QueuePool
 
 
@@ -803,3 +806,207 @@ def test_deterministic_ordering_for_list_datasets_and_list_artifacts(
     )
 
     assert [a.artifact_id for a in repo.list_artifacts()] == ["art_a", "art_b", "art_c"]
+
+
+# ----------------------------------------------------------------------
+# Milestone 3: Write-path ownership validation (Tests A - G)
+# ----------------------------------------------------------------------
+
+
+class _GlobalTestBase(DeclarativeBase):
+    pass
+
+
+class _PlatformGlobalRecord(_GlobalTestBase):
+    """Non-tenant entity used to verify global entities are unaffected by before_flush."""
+
+    __tablename__ = "atlas_test_platform_global"
+
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    value: Mapped[str] = mapped_column(String(128), nullable=False)
+
+
+def test_ownership_validation_a_valid_insertion(repo: SqlAlchemyMetadataRepository) -> None:
+    """Test A: Repository operating under workspace_a inserts an entity stamped with workspace_a."""
+    assert repo.engine is not None
+    factory = create_session_factory(repo.engine)
+
+    with factory(info={"workspace_id": "workspace_a"}) as session, session.begin():
+        assert isinstance(session, MetadataSession)
+        session.add(
+            _dataset_record(
+                "valid_ds",
+                "default",
+                "urn:atlas:dataset:default:valid_ds",
+                workspace_id="workspace_a",
+            )
+        )
+
+    repo_a = SqlAlchemyMetadataRepository(factory, workspace_id="workspace_a")
+    fetched = repo_a.get_dataset("valid_ds")
+    assert fetched is not None
+    assert fetched.dataset_id == "valid_ds"
+
+
+def test_ownership_validation_b_mismatch_on_insertion_rejected(
+    repo: SqlAlchemyMetadataRepository,
+) -> None:
+    """Test B: Session associated with workspace_a rejects inserting an entity for workspace_b."""
+    assert repo.engine is not None
+    factory = create_session_factory(repo.engine)
+
+    with pytest.raises(ValueError, match="Workspace ownership mismatch on insert"):
+        with factory(info={"workspace_id": "workspace_a"}) as session, session.begin():
+            session.add(
+                _dataset_record(
+                    "bad_ds",
+                    "default",
+                    "urn:atlas:dataset:default:bad_ds",
+                    workspace_id="workspace_b",
+                )
+            )
+
+
+def test_ownership_validation_c_mutation_of_persistent_workspace_id_rejected(
+    repo: SqlAlchemyMetadataRepository,
+) -> None:
+    """Test C: Mutating workspace_id of a persistent entity raises the exact ValueError."""
+    assert repo.engine is not None
+    factory = create_session_factory(repo.engine)
+
+    with factory(info={"workspace_id": "workspace_a"}) as session, session.begin():
+        session.add(
+            _dataset_record(
+                "immutable_ds",
+                "default",
+                "urn:atlas:dataset:default:immutable_ds",
+                workspace_id="workspace_a",
+            )
+        )
+
+    with pytest.raises(ValueError, match="^Cannot mutate workspace_id of a persistent entity$"):
+        with factory(info={"workspace_id": "workspace_a"}) as session, session.begin():
+            persisted = session.scalar(
+                select(DatasetRecord).where(
+                    DatasetRecord.workspace_id == "workspace_a",
+                    DatasetRecord.dataset_id == "immutable_ds",
+                )
+            )
+            assert persisted is not None
+            persisted.workspace_id = "workspace_b"
+            session.flush()
+
+
+def test_ownership_validation_d_cross_workspace_modification_rejected(
+    repo: SqlAlchemyMetadataRepository,
+) -> None:
+    """Test D: Modifying an entity belonging to workspace_b in a workspace_a session is rejected."""
+    assert repo.engine is not None
+    factory = create_session_factory(repo.engine)
+
+    with factory(info={"workspace_id": "workspace_b"}) as session, session.begin():
+        session.add(
+            _dataset_record(
+                "b_ds",
+                "default",
+                "urn:atlas:dataset:default:b_ds",
+                workspace_id="workspace_b",
+            )
+        )
+
+    with pytest.raises(ValueError, match="Workspace ownership mismatch on update"):
+        with factory(info={"workspace_id": "workspace_a"}) as session, session.begin():
+            foreign_record = session.scalar(
+                select(DatasetRecord).where(
+                    DatasetRecord.workspace_id == "workspace_b",
+                    DatasetRecord.dataset_id == "b_ds",
+                )
+            )
+            assert foreign_record is not None
+            foreign_record.owner = "tampered"
+            session.flush()
+
+
+def test_ownership_validation_e_cross_workspace_deletion_rejected(
+    repo: SqlAlchemyMetadataRepository,
+) -> None:
+    """Test E: Deleting an entity belonging to workspace_b in a workspace_a session is rejected."""
+    assert repo.engine is not None
+    factory = create_session_factory(repo.engine)
+
+    with factory(info={"workspace_id": "workspace_b"}) as session, session.begin():
+        session.add(
+            _dataset_record(
+                "b_del_ds",
+                "default",
+                "urn:atlas:dataset:default:b_del_ds",
+                workspace_id="workspace_b",
+            )
+        )
+
+    # Direct delete attempt under workspace_a session
+    with pytest.raises(ValueError, match="Workspace ownership mismatch on delete"):
+        with factory(info={"workspace_id": "workspace_a"}) as session, session.begin():
+            foreign_record = session.scalar(
+                select(DatasetRecord).where(
+                    DatasetRecord.workspace_id == "workspace_b",
+                    DatasetRecord.dataset_id == "b_del_ds",
+                )
+            )
+            assert foreign_record is not None
+            session.delete(foreign_record)
+            session.flush()
+
+    # Delete attempt after mutating workspace_id in memory to match session workspace_a
+    with pytest.raises(ValueError, match="Workspace ownership mismatch on delete"):
+        with factory(info={"workspace_id": "workspace_a"}) as session, session.begin():
+            foreign_record = session.scalar(
+                select(DatasetRecord).where(
+                    DatasetRecord.workspace_id == "workspace_b",
+                    DatasetRecord.dataset_id == "b_del_ds",
+                )
+            )
+            assert foreign_record is not None
+            foreign_record.workspace_id = "workspace_a"
+            session.delete(foreign_record)
+            session.flush()
+
+
+def test_ownership_validation_f_missing_workspace_identity_fails_closed(
+    repo: SqlAlchemyMetadataRepository,
+) -> None:
+    """Test F: Flushing a tenant-owned entity without a valid session workspace_id fails closed."""
+    assert repo.engine is not None
+    factory = create_session_factory(repo.engine)
+
+    for invalid_info in ({}, {"workspace_id": None}, {"workspace_id": "   "}):
+        with pytest.raises(ValueError, match="without a valid 'workspace_id' in session.info"):
+            with factory(info=invalid_info) as session, session.begin():
+                session.add(
+                    _dataset_record(
+                        "unscoped_ds",
+                        "default",
+                        "urn:atlas:dataset:default:unscoped_ds",
+                        workspace_id="workspace_a",
+                    )
+                )
+
+
+def test_ownership_validation_g_global_entities_and_global_session_unaffected(
+    repo: SqlAlchemyMetadataRepository,
+) -> None:
+    """Test G: Non-TenantOwnedMixin entities flush without workspace_id and Session is untouched."""
+    assert repo.engine is not None
+    assert not event.contains(Session, "before_flush", validate_workspace_ownership)
+
+    _GlobalTestBase.metadata.create_all(repo.engine)
+    factory = create_session_factory(repo.engine)
+
+    # Flushing a platform-global entity through MetadataSession without workspace_id succeeds
+    with factory() as session, session.begin():
+        session.add(_PlatformGlobalRecord(key="version", value="1.0.0"))
+
+    with factory() as session:
+        loaded = session.get(_PlatformGlobalRecord, "version")
+        assert loaded is not None
+        assert loaded.value == "1.0.0"
