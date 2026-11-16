@@ -806,10 +806,22 @@ def resolve_metadata_database_path(
             field=field,
         )
 
-    if not raw_url.lower().startswith("sqlite:"):
+    lower_raw = raw_url.lower()
+    if lower_raw.startswith(("postgresql://", "postgresql+psycopg://")):
+        _, _, remainder = raw_url.partition("://")
+        if not remainder.strip() or "/" not in remainder:
+            raise RunnerConfigurationError(
+                f"Invalid PostgreSQL database_url '{raw_url}': expected "
+                "'postgresql+psycopg://<user>:<password>@<host>:<port>/<database>'.",
+                config_file=cfg_str,
+                field=field,
+            )
+        return None
+
+    if not lower_raw.startswith("sqlite:"):
         raise RunnerConfigurationError(
             f"Unsupported metadata database_url '{raw_url}': only SQLite ('sqlite:///...') "
-            "database URLs are supported.",
+            "and PostgreSQL ('postgresql+psycopg://...') database URLs are supported.",
             config_file=cfg_str,
             field=field,
         )
