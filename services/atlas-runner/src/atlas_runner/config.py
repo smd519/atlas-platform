@@ -211,11 +211,33 @@ def _resolve_maybe_relative_path(
     field: str | None = None,
 ) -> Any:
     """Resolve and audit a string path against ``workspace`` unless it is a context reference."""
-    if not isinstance(raw_value, str):
+    if raw_value is None:
         return raw_value
+        
+    if not isinstance(raw_value, str):
+        cfg_str = str(config_file) if config_file is not None else None
+        raise RunnerConfigurationError(
+            f"Invalid type for path configuration. Expected a string, but got '{type(raw_value).__name__}' "
+            f"for field '{field or 'path'}'.",
+            config_file=cfg_str,
+            field=field or "path",
+        )
+        
     stripped = raw_value.strip()
     if not stripped:
         return raw_value
+        
+    if Path(stripped).is_absolute():
+        cfg_str = str(config_file) if config_file is not None else None
+        raise WorkspaceIsolationError(
+            f"Absolute paths are not allowed in workflow configurations: "
+            f"'{stripped}' (field '{field or 'path'}').",
+            config_file=cfg_str,
+            field=field or "path",
+            offending_path=stripped,
+            workspace=str(Path(str(workspace)).resolve()),
+        )
+        
     if "${" in stripped:
         if ".." in Path(stripped).parts:
             cfg_str = str(config_file) if config_file is not None else None
