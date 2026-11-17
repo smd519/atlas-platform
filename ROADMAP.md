@@ -33,14 +33,22 @@ silent, the cell is not marked complete.
 | Quality results published to catalog (`latest_quality_assessment`, bounded history) | — | — | — | — | — | ✅ | — | — | — |
 | Orchestration propagates a `MetadataProvider` to step executors | — | — | — | — | — | — | — | ⬜ | — |
 
+## Phase 3 — Multi-Tenancy & Isolation
+
+| Capability | core | storage | connectors | ingestion | processing | quality | metadata | orchestration | spatial |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Workspace contextual identity and propagation | 🟡 | — | — | — | — | — | — | — | — |
+| Multi-tenant schema (Composite PKs/FKs, `TenantOwnedMixin`) | — | — | — | — | — | — | ✅ | — | — |
+| Write-path ownership invariant validation (`before_flush`) | — | — | — | — | — | — | ✅ | — | — |
+| Workspace-isolated physical file paths & prefixes | — | ⬜ | — | — | — | — | — | — | — |
+| Database-enforced Row-Level Security (RLS) | — | — | — | — | — | — | ⬜ | — | — |
+
 ## Notes
 
-- **Ingestion & Quality (✅):** Phase 2 `MetadataProvider` auto-registration for Bronze datasets/artifacts and bounded assessment history publishing under `custom_properties` are documented in `atlas-ingestion` and `atlas-quality` READMEs.
-- **Orchestration (⬜):** the README documents Phase 1 (domain foundation) and Phase 2 (sequential execution)
-  of that module, and does not mention metadata. Its "Phase" numbering is module-local and distinct from this roadmap.
-- **Spatial (⬜):** the README contains only a title.
-- Storage persistence and catalog registration in processing are documented as **not transactional**.
-- Platform-level planned items from the onboarding guide: scheduler (`atlas-scheduler`), API (`atlas-api`),
-  cloud storage, distributed execution, and Gold data products.
-
-See also the long-range phase outline in `docs/architecture/roadmap.md`.
+* **Ingestion & Quality (✅):** Phase 2 `MetadataProvider` auto-registration for Bronze datasets/artifacts and bounded assessment history publishing under `custom_properties` are documented in `atlas-ingestion` and `atlas-quality` READMEs.
+* **Orchestration (⬜):** the README documents Phase 1 (domain foundation) and Phase 2 (sequential execution) of that module, and does not mention metadata. Its "Phase" numbering is module-local and distinct from this roadmap.
+* **Multi-Tenancy (✅/⬜):** Application-level enforcement (`before_flush` and explicit `.where()` repository filters) is complete and documented in `atlas-metadata`. PostgreSQL RLS is explicitly deferred to a future infrastructure hardening phase to prevent blocking current application development.
+* **Storage Isolation (⬜):** `atlas-storage` requires updates to securely map `workspace_id` to physical storage prefixes to prevent cross-tenant file traversal.
+* **Spatial (⬜):** the README contains only a title.
+* Storage persistence and catalog registration in processing are documented as **not transactional**.
+* Platform-level planned items from the onboarding guide: scheduler (`atlas-scheduler`), API (`atlas-api`), cloud storage, distributed execution, and Gold data products.
