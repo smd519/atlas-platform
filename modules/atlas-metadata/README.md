@@ -54,10 +54,12 @@ modules/atlas-metadata/
 │       │   ├── __init__.py
 │       │   ├── contracts.py
 │       │   ├── memory.py
-│       │   └── sqlalchemy/        # optional persistent backend (SQLite first)
-│       │       ├── base.py        # declarative Base, session plumbing, error translation
+│       │   └── sqlalchemy/        # optional persistent backend (SQLite & PostgreSQL)
+│       │       ├── base.py        # declarative Base, repository base, session helpers
+│       │       ├── session.py     # MetadataSession (scoped Session subclass)
+│       │       ├── events.py      # before_flush workspace ownership validation
 │       │       ├── database.py    # engine, session factory, create_all, SQLite settings
-│       │       ├── models.py      # ORM records (infrastructure only)
+│       │       ├── models.py      # ORM records & TenantOwnedMixin (infrastructure only)
 │       │       ├── mappings.py    # domain <-> ORM translation
 │       │       ├── dataset.py
 │       │       ├── schema.py
@@ -180,9 +182,10 @@ artifacts = metadata_service.list_artifacts(
 from atlas_metadata import MetadataService
 from atlas_metadata.repositories.sqlalchemy import SqlAlchemyMetadataRepository
 
-# The URL is supplied by the caller (for example from the customer workspace); nothing is hardcoded.
+# The URL and workspace_id are supplied by the caller (for example from the customer workspace).
 repository = SqlAlchemyMetadataRepository.from_url(
-    "sqlite:////absolute/workspace/path/metadata/catalog.db"
+    "sqlite:////absolute/workspace/path/metadata/catalog.db",
+    workspace_id="customer_001",
 )
 service = MetadataService(repository=repository)
 
@@ -190,13 +193,26 @@ service = MetadataService(repository=repository)
 repository.dispose()  # release pooled connections on shutdown
 ```
 
-- **Initialization** (`initialize=True` by default) runs `create_all`: it creates missing tables, creates the parent directory of a file-based SQLite database, and never drops, recreates, or alters existing data. There is no migration tooling yet; schema changes in this phase are handled by deliberately recreating the database file.
+- **Workspace-Scoped Multi-Tenancy (`workspace_id`)**: Every tenant-owned ORM record (`atlas_datasets`, `atlas_schemas`, `atlas_schema_columns`, `atlas_artifacts`) inherits from `TenantOwnedMixin` (`workspace_id`) and uses composite primary keys, composite foreign keys (`(workspace_id, schema_id)`), and workspace-scoped unique constraints. `SqlAlchemyMetadataRepository` requires a non-empty `workspace_id` and scopes all reads and writes to that workspace while keeping Pydantic domain models and repository method signatures completely agnostic of tenancy.
+- **Explicit Repository Filtering (No Magic Reads)**: Repository queries intentionally use explicit `.where(Model.workspace_id == self._workspace_id)` predicates rather than `do_orm_execute`, `with_loader_criteria`, or hidden query rewriting so tenant isolation is immediately visible at every query site.
+- **Scoped Session (`MetadataSession`) & `before_flush` Write-Path Ownership Validation**:
+  - `create_session_factory()` binds a `sessionmaker` using `class_=MetadataSession` and registers `validate_workspace_ownership` on the metadata `sessionmaker` (never on the global `sqlalchemy.orm.Session` class).
+  - Repository methods open short-lived sessions via `_read_session()` and `_write_session()`, passing `info={"workspace_id": self._workspace_id}` from the repository's authoritative `_workspace_id`.
+  - On every ORM flush (`before_flush`), only entities inheriting from `TenantOwnedMixin` are validated (platform-global entities not inheriting from `TenantOwnedMixin` are ignored and do not require `workspace_id`):
+    - **Missing workspace identity**: fails closed (`ValueError`) if `session.info.get("workspace_id")` is missing or empty.
+    - **Insertions (`session.new`)**: rejects flushing if `entity.workspace_id != session.info["workspace_id"]`.
+    - **Modifications (`session.dirty`)**: inspects `inspect(entity).attrs.workspace_id.history` and raises `ValueError("Cannot mutate workspace_id of a persistent entity")` if `workspace_id` was modified; also rejects modifications where `entity.workspace_id != session.info["workspace_id"]`.
+    - **Deletions (`session.deleted`)**: inspects attribute history to verify the original persisted `workspace_id` matches `session.info["workspace_id"]`, rejecting cross-workspace deletions.
+  - **Limitations of Application-Level Enforcement**: `before_flush` only intercepts SQLAlchemy ORM unit-of-work flushes. It does **not** intercept or protect arbitrary raw SQL (`session.execute(text(...))`) or SQLAlchemy Core statements (`insert()`, `update()`, `delete()`), and it does not replace database-level security. PostgreSQL Row-Level Security (RLS) remains a separate future security milestone.
+- **Initialization & Local Development Schema Reset**: `initialize=True` (the default) runs `Base.metadata.create_all(engine)`: it creates missing tables, creates the parent directory of a file-based SQLite database, and never drops, recreates, or alters existing tables. Because automatic legacy SQLite migrations are intentionally omitted, **developers must manually delete any pre-existing local `catalog.db` file** (for example `metadata/catalog.db` inside a local workspace) when upgrading to the composite-key schema so `create_all()` can recreate it cleanly.
+- **Deterministic Ordering**: `list_datasets()` orders by `(created_at, dataset_id)` and `list_artifacts()` orders by `(created_at, artifact_id)`.
 - **Isolation**: Pydantic domain models never import SQLAlchemy. ORM records live in `repositories/sqlalchemy/models.py` and are translated by `mappings.py`. `import atlas_metadata` does not import SQLAlchemy.
 - **Sessions and transactions**: every repository call opens its own short-lived `Session` (`factory.begin()` for writes), so sessions are never shared across threads and connections always return to the pool.
-- **Schema version allocation**: `register_next_schema` computes `max(version) + 1` inside a transaction, backed by a unique constraint on `(namespace, dataset_id, version)`. A concurrent writer winning the same version triggers a bounded retry (`max_allocation_attempts`, default 10); other integrity errors are not retried.
+- **Schema version allocation**: `register_next_schema` computes `max(version) + 1` inside a transaction, backed by a unique constraint on `(workspace_id, namespace, dataset_id, version)`. A concurrent writer winning the same version triggers a bounded retry (`max_allocation_attempts`, default 10); other integrity errors are not retried.
 - **SQLite settings** (isolated in `database.py`): WAL journal mode, `busy_timeout`/connect timeout (`sqlite_timeout`, default 30s), foreign keys on, and `check_same_thread=False`. A private `sqlite://` in-memory database uses a single shared connection (tests/single-threaded use only).
 - **SQLite limitation**: SQLite permits one writer at a time. WAL lets readers proceed during a write and the timeout makes a second writer wait, but write throughput is serialized.
-- **PostgreSQL later**: pass a PostgreSQL URL (for example `postgresql+psycopg://user:password@host:5432/atlas`) and install the driver; no repository code changes are needed. ORM types are portable (`String`, `Text`, `Integer`, `BigInteger`, `Boolean`, `JSON`), and dataset tag filtering is done in Python because JSON-array containment is not portable SQL.
+- **PostgreSQL later**: supported by the SQLAlchemy implementation.
+Future production deployments may use shared or dedicated PostgreSQL databases without changing metadata domain models or repository contracts. pass a PostgreSQL URL (for example `postgresql+psycopg://user:password@host:5432/atlas`) and install the driver; no repository code changes are needed. ORM types are portable (`String`, `Text`, `Integer`, `BigInteger`, `Boolean`, `JSON`), and dataset tag filtering is done in Python because JSON-array containment is not portable SQL.
 - **Contract notes**: repository lookups take only `dataset_id` (no namespace), so `dataset_id` is treated as unique catalog-wide even though the database constraint is `(namespace, dataset_id)`. Schemas and artifacts have no foreign key to datasets because the contracts allow registering them independently of a dataset record.
 
 ---

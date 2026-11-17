@@ -14,6 +14,7 @@ dependencies = [
     "mkdocs-gen-files>=0.6.1",
     "mkdocs-material>=9.8.1",
     "pandas>=3.1.0",
+    "psycopg[binary]>=3.3.9",
     "pyarrow>=26.0.1",
     "pydantic>=2.14.2",
     "pydantic-settings>=2.16.2",
@@ -63,6 +64,9 @@ testpaths = [
     "tests",
 ]
 addopts = "-ra --strict-markers"
+markers = [
+    "postgresql: marks tests that target a live PostgreSQL database",
+]
 
 [tool.ruff]
 line-length = 100

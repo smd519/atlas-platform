@@ -13,6 +13,7 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from atlas_metadata.exceptions import MetadataRepositoryError
+from atlas_metadata.repositories.sqlalchemy.session import MetadataSession
 
 # Explicit constraint naming keeps DDL deterministic across SQLite and PostgreSQL and makes
 # a later move to migration tooling straightforward.
@@ -31,7 +32,7 @@ class Base(DeclarativeBase):
     metadata = MetaData(naming_convention=NAMING_CONVENTION)
 
 
-SessionFactory = sessionmaker[Session]
+SessionFactory = sessionmaker[MetadataSession]
 
 
 @contextmanager
@@ -53,16 +54,43 @@ def translate_database_errors(operation: str) -> Iterator[None]:
 
 
 class SqlAlchemyRepositoryBase:
-    """Holds the session factory shared by the dataset, schema, and artifact repositories.
+    """Holds the session factory and workspace scope shared by SQLAlchemy repositories.
 
-    Every repository method opens its own short-lived :class:`Session` from the factory (reads
-    with ``with factory() as session``; writes with ``with factory.begin() as session``), so a
-    session is never shared across threads or concurrent DAG tasks and its connection is always
-    returned to the pool when the operation ends.
+    Every repository method opens its own short-lived :class:`MetadataSession` from the factory
+    via :meth:`_read_session` or :meth:`_write_session` with
+    ``info={"workspace_id": self._workspace_id}``, so a session is never shared across threads,
+    operations, or workspaces and its connection is always returned to the pool when the
+    operation ends.
     """
 
-    def __init__(self, session_factory: SessionFactory) -> None:
+    def __init__(self, session_factory: SessionFactory, *, workspace_id: str) -> None:
+        if not isinstance(workspace_id, str) or not workspace_id.strip():
+            raise ValueError("workspace_id must be a non-empty string.")
+        from atlas_metadata.repositories.sqlalchemy.events import register_session_events
+
+        register_session_events(session_factory)
         self._session_factory = session_factory
+        self._workspace_id = workspace_id.strip()
+
+    @property
+    def workspace_id(self) -> str:
+        """Return the logical workspace identifier scoped to this repository instance."""
+        return self._workspace_id
+
+    @contextmanager
+    def _read_session(self) -> Iterator[Session]:
+        """Open a short-lived read session bound to this repository's ``workspace_id``."""
+        with self._session_factory(info={"workspace_id": self._workspace_id}) as session:
+            yield session
+
+    @contextmanager
+    def _write_session(self) -> Iterator[Session]:
+        """Open a short-lived transactional write session bound to ``workspace_id``."""
+        with (
+            self._session_factory(info={"workspace_id": self._workspace_id}) as session,
+            session.begin(),
+        ):
+            yield session
 
 
 __all__ = [

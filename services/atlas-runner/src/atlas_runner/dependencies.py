@@ -22,9 +22,22 @@ from atlas_storage import FileSystemBackend, StorageManager
 from atlas_runner.config import (
     load_workspace_config,
     resolve_metadata_database_url,
+    resolve_workspace,
 )
 from atlas_runner.exceptions import RunnerConfigurationError
 from atlas_runner.models import MetadataConfig, WorkspaceConfig
+
+
+def _resolve_workspace_id(workspace: str | Path | WorkspaceContext | None) -> str:
+    """Resolve the active ``workspace_id`` for SQLAlchemy metadata persistence."""
+    if isinstance(workspace, WorkspaceContext):
+        return workspace.workspace_id
+    if workspace is not None:
+        return resolve_workspace(workspace, field="workspace").workspace_id
+    raise RunnerConfigurationError(
+        "Workspace is required when metadata.backend is 'sqlalchemy'.",
+        field="workspace",
+    )
 
 
 def _resolve_metadata_config(
@@ -98,6 +111,7 @@ def build_metadata_service(
                 "metadata.database_url is required when metadata.backend is 'sqlalchemy'.",
                 field="metadata.database_url",
             )
+        workspace_id = _resolve_workspace_id(workspace)
         resolved_url = resolve_metadata_database_url(
             resolved_cfg.database_url,
             workspace=workspace,
@@ -106,7 +120,10 @@ def build_metadata_service(
         )
         from atlas_metadata.repositories.sqlalchemy import SqlAlchemyMetadataRepository
 
-        repository = SqlAlchemyMetadataRepository.from_url(resolved_url)
+        repository = SqlAlchemyMetadataRepository.from_url(
+            resolved_url,
+            workspace_id=workspace_id,
+        )
         return MetadataService(repository=repository)
 
     raise RunnerConfigurationError(

@@ -177,6 +177,7 @@ def test_sqlalchemy_configuration_creates_persistent_sqlite_repository_and_share
 
     assert isinstance(shared_metadata, MetadataService)
     assert isinstance(shared_metadata.repository, SqlAlchemyMetadataRepository)
+    assert shared_metadata.repository.workspace_id == "customer_alpha"
 
     assert isinstance(deps.ingestion_service, IngestionService)
     assert isinstance(deps.processing_service, ProcessingService)
@@ -395,7 +396,7 @@ def test_strict_pydantic_validation_for_metadata_and_workspace_configuration(
     with pytest.raises(RunnerConfigurationError):
         build_default_dependencies(
             workspace=tmp_path,
-            metadata_config={"backend": "sqlalchemy", "database_url": "postgresql://localhost/db"},
+            metadata_config={"backend": "sqlalchemy", "database_url": "mysql://localhost/db"},
         )
 
 

@@ -37,12 +37,20 @@ class SqlAlchemyArtifactRepository(SqlAlchemyRepositoryBase, ArtifactRepository)
         try:
             with (
                 translate_database_errors("save_artifact"),
-                self._session_factory.begin() as session,
+                self._write_session() as session,
             ):
                 existing = session.scalar(
-                    select(ArtifactRecord).where(ArtifactRecord.artifact_id == artifact.artifact_id)
+                    select(ArtifactRecord).where(
+                        ArtifactRecord.workspace_id == self._workspace_id,
+                        ArtifactRecord.artifact_id == artifact.artifact_id,
+                    )
                 )
-                urn_owner = session.scalar(select(ArtifactRecord).where(ArtifactRecord.urn == urn))
+                urn_owner = session.scalar(
+                    select(ArtifactRecord).where(
+                        ArtifactRecord.workspace_id == self._workspace_id,
+                        ArtifactRecord.urn == urn,
+                    )
+                )
 
                 if (existing is not None or urn_owner is not None) and not overwrite:
                     raise self._duplicate_artifact(artifact)
@@ -50,25 +58,37 @@ class SqlAlchemyArtifactRepository(SqlAlchemyRepositoryBase, ArtifactRepository)
                     raise self._duplicate_artifact(artifact)
 
                 if existing is None:
-                    session.add(apply_artifact_to_record(ArtifactRecord(), artifact))
+                    session.add(
+                        apply_artifact_to_record(
+                            ArtifactRecord(), artifact, workspace_id=self._workspace_id
+                        )
+                    )
                 else:
-                    apply_artifact_to_record(existing, artifact)
+                    apply_artifact_to_record(existing, artifact, workspace_id=self._workspace_id)
                 session.flush()
         except IntegrityError as exc:
             raise self._duplicate_artifact(artifact) from exc
         return artifact
 
     def get_artifact(self, artifact_id: str) -> ArtifactMetadata | None:
-        with translate_database_errors("get_artifact"), self._session_factory() as session:
+        with translate_database_errors("get_artifact"), self._read_session() as session:
             record = session.scalar(
-                select(ArtifactRecord).where(ArtifactRecord.artifact_id == artifact_id.strip())
+                select(ArtifactRecord).where(
+                    ArtifactRecord.workspace_id == self._workspace_id,
+                    ArtifactRecord.artifact_id == artifact_id.strip(),
+                )
             )
             return record_to_artifact(record) if record is not None else None
 
     def get_artifact_by_urn(self, urn: URN | str) -> ArtifactMetadata | None:
         parsed = URN.parse(urn)
-        with translate_database_errors("get_artifact_by_urn"), self._session_factory() as session:
-            record = session.scalar(select(ArtifactRecord).where(ArtifactRecord.urn == str(parsed)))
+        with translate_database_errors("get_artifact_by_urn"), self._read_session() as session:
+            record = session.scalar(
+                select(ArtifactRecord).where(
+                    ArtifactRecord.workspace_id == self._workspace_id,
+                    ArtifactRecord.urn == str(parsed),
+                )
+            )
             return record_to_artifact(record) if record is not None else None
 
     def list_artifacts(
@@ -77,13 +97,17 @@ class SqlAlchemyArtifactRepository(SqlAlchemyRepositoryBase, ArtifactRepository)
         dataset_id: str | None = None,
         execution_id: str | None = None,
     ) -> list[ArtifactMetadata]:
-        statement = select(ArtifactRecord).order_by(ArtifactRecord.id)
+        statement = (
+            select(ArtifactRecord)
+            .where(ArtifactRecord.workspace_id == self._workspace_id)
+            .order_by(ArtifactRecord.created_at, ArtifactRecord.artifact_id)
+        )
         if dataset_id is not None:
             statement = statement.where(ArtifactRecord.dataset_id == dataset_id.strip())
         if execution_id is not None:
             statement = statement.where(ArtifactRecord.execution_id == execution_id.strip())
 
-        with translate_database_errors("list_artifacts"), self._session_factory() as session:
+        with translate_database_errors("list_artifacts"), self._read_session() as session:
             return [record_to_artifact(record) for record in session.scalars(statement)]
 
     @staticmethod

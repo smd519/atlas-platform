@@ -32,7 +32,10 @@ class SqlAlchemyMetadataRepository(
 
     Example::
 
-        repository = SqlAlchemyMetadataRepository.from_url("sqlite:////abs/path/catalog.db")
+        repository = SqlAlchemyMetadataRepository.from_url(
+            "sqlite:////abs/path/catalog.db",
+            workspace_id="customer_001",
+        )
         service = MetadataService(repository=repository)
     """
 
@@ -40,10 +43,15 @@ class SqlAlchemyMetadataRepository(
         self,
         session_factory: SessionFactory,
         *,
+        workspace_id: str,
         engine: Engine | None = None,
         max_allocation_attempts: int = DEFAULT_MAX_ALLOCATION_ATTEMPTS,
     ) -> None:
-        super().__init__(session_factory, max_allocation_attempts=max_allocation_attempts)
+        super().__init__(
+            session_factory,
+            workspace_id=workspace_id,
+            max_allocation_attempts=max_allocation_attempts,
+        )
         self._engine = engine
 
     @classmethod
@@ -51,20 +59,25 @@ class SqlAlchemyMetadataRepository(
         cls,
         database_url: str | URL,
         *,
+        workspace_id: str,
         initialize: bool = True,
         max_allocation_attempts: int = DEFAULT_MAX_ALLOCATION_ATTEMPTS,
         **engine_kwargs: Any,
     ) -> SqlAlchemyMetadataRepository:
-        """Create a repository for ``database_url``, creating missing tables when ``initialize``.
+        """Create a repository for ``database_url`` scoped to ``workspace_id``.
 
-        Initialization never drops or recreates existing tables or data. ``engine_kwargs`` are
-        forwarded to :func:`create_metadata_engine`.
+        Creates missing tables when ``initialize`` is ``True``. Initialization never drops or
+        recreates existing tables or data. ``engine_kwargs`` are forwarded to
+        :func:`create_metadata_engine`.
         """
+        if not isinstance(workspace_id, str) or not workspace_id.strip():
+            raise ValueError("workspace_id must be a non-empty string.")
         engine = create_metadata_engine(database_url, **engine_kwargs)
         if initialize:
             initialize_database(engine)
         return cls(
             create_session_factory(engine),
+            workspace_id=workspace_id,
             engine=engine,
             max_allocation_attempts=max_allocation_attempts,
         )

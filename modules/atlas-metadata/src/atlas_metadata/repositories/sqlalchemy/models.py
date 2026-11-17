@@ -24,9 +24,10 @@ from sqlalchemy import (
     BigInteger,
     Boolean,
     DateTime,
-    ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Integer,
+    PrimaryKeyConstraint,
     String,
     Text,
     UniqueConstraint,
@@ -36,6 +37,12 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.types import TypeDecorator
 
 from atlas_metadata.repositories.sqlalchemy.base import Base
+
+
+class TenantOwnedMixin:
+    """Mixin supplying the mandatory ``workspace_id`` column for tenant-owned tables."""
+
+    workspace_id: Mapped[str] = mapped_column(String(128), nullable=False)
 
 
 class UTCDateTime(TypeDecorator[datetime]):
@@ -61,20 +68,29 @@ class UTCDateTime(TypeDecorator[datetime]):
         return value.replace(tzinfo=UTC)
 
 
-class DatasetRecord(Base):
+class DatasetRecord(TenantOwnedMixin, Base):
     """Persistent form of :class:`atlas_metadata.models.dataset.DatasetMetadata`."""
 
     __tablename__ = "atlas_datasets"
     __table_args__ = (
-        UniqueConstraint("namespace", "dataset_id", name="uq_atlas_datasets_namespace_dataset_id"),
-        Index("ix_atlas_datasets_dataset_id", "dataset_id"),
-        Index("ix_atlas_datasets_layer", "layer"),
-        Index("ix_atlas_datasets_owner", "owner"),
+        PrimaryKeyConstraint("workspace_id", "dataset_id", name="pk_atlas_datasets"),
+        UniqueConstraint(
+            "workspace_id",
+            "namespace",
+            "dataset_id",
+            name="uq_atlas_datasets_workspace_id_namespace_dataset_id",
+        ),
+        UniqueConstraint(
+            "workspace_id",
+            "urn",
+            name="uq_atlas_datasets_workspace_id_urn",
+        ),
+        Index("ix_atlas_datasets_workspace_id_layer", "workspace_id", "layer"),
+        Index("ix_atlas_datasets_workspace_id_owner", "workspace_id", "owner"),
     )
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     dataset_id: Mapped[str] = mapped_column(String(255), nullable=False)
-    urn: Mapped[str] = mapped_column(String(512), nullable=False, unique=True)
+    urn: Mapped[str] = mapped_column(String(512), nullable=False)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     namespace: Mapped[str] = mapped_column(String(128), nullable=False)
     layer: Mapped[str] = mapped_column(String(64), nullable=False)
@@ -91,23 +107,34 @@ class DatasetRecord(Base):
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime, nullable=False)
 
 
-class SchemaRecord(Base):
+class SchemaRecord(TenantOwnedMixin, Base):
     """Persistent form of :class:`atlas_metadata.models.schema.SchemaMetadata` (header row)."""
 
     __tablename__ = "atlas_schemas"
     __table_args__ = (
+        PrimaryKeyConstraint("workspace_id", "schema_id", name="pk_atlas_schemas"),
         UniqueConstraint(
+            "workspace_id",
             "namespace",
             "dataset_id",
             "version",
-            name="uq_atlas_schemas_namespace_dataset_id_version",
+            name="uq_atlas_schemas_workspace_id_namespace_dataset_id_version",
         ),
-        Index("ix_atlas_schemas_dataset_id_version", "dataset_id", "version"),
+        UniqueConstraint(
+            "workspace_id",
+            "urn",
+            name="uq_atlas_schemas_workspace_id_urn",
+        ),
+        Index(
+            "ix_atlas_schemas_workspace_id_dataset_id_version",
+            "workspace_id",
+            "dataset_id",
+            "version",
+        ),
     )
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     schema_id: Mapped[str] = mapped_column(String(300), nullable=False)
-    urn: Mapped[str] = mapped_column(String(512), nullable=False, unique=True)
+    urn: Mapped[str] = mapped_column(String(512), nullable=False)
     dataset_id: Mapped[str] = mapped_column(String(255), nullable=False)
     namespace: Mapped[str] = mapped_column(String(128), nullable=False)
     version: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -125,7 +152,7 @@ class SchemaRecord(Base):
     )
 
 
-class SchemaColumnRecord(Base):
+class SchemaColumnRecord(TenantOwnedMixin, Base):
     """Persistent form of :class:`atlas_metadata.models.schema.ColumnMetadata`.
 
     ``position`` preserves the declared column order.
@@ -133,18 +160,24 @@ class SchemaColumnRecord(Base):
 
     __tablename__ = "atlas_schema_columns"
     __table_args__ = (
-        UniqueConstraint(
-            "schema_pk", "position", name="uq_atlas_schema_columns_schema_pk_position"
+        PrimaryKeyConstraint(
+            "workspace_id", "schema_id", "position", name="pk_atlas_schema_columns"
         ),
-        UniqueConstraint("schema_pk", "name", name="uq_atlas_schema_columns_schema_pk_name"),
+        ForeignKeyConstraint(
+            ["workspace_id", "schema_id"],
+            ["atlas_schemas.workspace_id", "atlas_schemas.schema_id"],
+            name="fk_atlas_schema_columns_workspace_id_schema_id_atlas_schemas",
+            ondelete="CASCADE",
+        ),
+        UniqueConstraint(
+            "workspace_id",
+            "schema_id",
+            "name",
+            name="uq_atlas_schema_columns_workspace_id_schema_id_name",
+        ),
     )
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    schema_pk: Mapped[int] = mapped_column(
-        Integer,
-        ForeignKey("atlas_schemas.id", ondelete="CASCADE"),
-        nullable=False,
-    )
+    schema_id: Mapped[str] = mapped_column(String(300), nullable=False)
     position: Mapped[int] = mapped_column(Integer, nullable=False)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     data_type: Mapped[str] = mapped_column(String(128), nullable=False)
@@ -158,22 +191,29 @@ class SchemaColumnRecord(Base):
     schema: Mapped[SchemaRecord] = relationship(back_populates="columns")
 
 
-class ArtifactRecord(Base):
+class ArtifactRecord(TenantOwnedMixin, Base):
     """Persistent form of :class:`atlas_metadata.models.artifact.ArtifactMetadata`."""
 
     __tablename__ = "atlas_artifacts"
     __table_args__ = (
+        PrimaryKeyConstraint("workspace_id", "artifact_id", name="pk_atlas_artifacts"),
         UniqueConstraint(
-            "namespace", "artifact_id", name="uq_atlas_artifacts_namespace_artifact_id"
+            "workspace_id",
+            "namespace",
+            "artifact_id",
+            name="uq_atlas_artifacts_workspace_id_namespace_artifact_id",
         ),
-        Index("ix_atlas_artifacts_artifact_id", "artifact_id"),
-        Index("ix_atlas_artifacts_dataset_id", "dataset_id"),
-        Index("ix_atlas_artifacts_execution_id", "execution_id"),
+        UniqueConstraint(
+            "workspace_id",
+            "urn",
+            name="uq_atlas_artifacts_workspace_id_urn",
+        ),
+        Index("ix_atlas_artifacts_workspace_id_dataset_id", "workspace_id", "dataset_id"),
+        Index("ix_atlas_artifacts_workspace_id_execution_id", "workspace_id", "execution_id"),
     )
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     artifact_id: Mapped[str] = mapped_column(String(255), nullable=False)
-    urn: Mapped[str] = mapped_column(String(512), nullable=False, unique=True)
+    urn: Mapped[str] = mapped_column(String(512), nullable=False)
     dataset_id: Mapped[str] = mapped_column(String(255), nullable=False)
     namespace: Mapped[str] = mapped_column(String(128), nullable=False)
     uri: Mapped[str] = mapped_column(Text, nullable=False)
@@ -194,5 +234,6 @@ __all__ = [
     "DatasetRecord",
     "SchemaColumnRecord",
     "SchemaRecord",
+    "TenantOwnedMixin",
     "UTCDateTime",
 ]

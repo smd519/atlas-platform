@@ -40,16 +40,17 @@ class SqlAlchemySchemaRepository(SqlAlchemyRepositoryBase, SchemaRepository):
         self,
         session_factory: SessionFactory,
         *,
+        workspace_id: str,
         max_allocation_attempts: int = DEFAULT_MAX_ALLOCATION_ATTEMPTS,
     ) -> None:
-        super().__init__(session_factory)
+        super().__init__(session_factory, workspace_id=workspace_id)
         if max_allocation_attempts < 1:
             raise ValueError("max_allocation_attempts must be >= 1.")
         self._max_allocation_attempts = max_allocation_attempts
 
     def save_schema(self, schema: SchemaMetadata) -> SchemaMetadata:
         try:
-            with translate_database_errors("save_schema"), self._session_factory.begin() as session:
+            with translate_database_errors("save_schema"), self._write_session() as session:
                 self._insert_schema(session, schema)
         except IntegrityError as exc:
             raise self._schema_conflict(schema) from exc
@@ -72,11 +73,12 @@ class SqlAlchemySchemaRepository(SqlAlchemyRepositoryBase, SchemaRepository):
             try:
                 with (
                     translate_database_errors("register_next_schema"),
-                    self._session_factory.begin() as session,
+                    self._write_session() as session,
                 ):
                     current = session.scalar(
                         select(func.max(SchemaRecord.version)).where(
-                            SchemaRecord.dataset_id == clean_ds
+                            SchemaRecord.workspace_id == self._workspace_id,
+                            SchemaRecord.dataset_id == clean_ds,
                         )
                     )
                     last_version = (current or 0) + 1
@@ -115,28 +117,39 @@ class SqlAlchemySchemaRepository(SqlAlchemyRepositoryBase, SchemaRepository):
         dataset_id: str,
         version: int | None = None,
     ) -> SchemaMetadata | None:
-        statement = select(SchemaRecord).where(SchemaRecord.dataset_id == dataset_id.strip())
+        statement = select(SchemaRecord).where(
+            SchemaRecord.workspace_id == self._workspace_id,
+            SchemaRecord.dataset_id == dataset_id.strip(),
+        )
         if version is not None:
             statement = statement.where(SchemaRecord.version == version)
         statement = statement.order_by(SchemaRecord.version.desc(), SchemaRecord.namespace).limit(1)
 
-        with translate_database_errors("get_schema"), self._session_factory() as session:
+        with translate_database_errors("get_schema"), self._read_session() as session:
             record = session.scalar(statement)
             return record_to_schema(record) if record is not None else None
 
     def get_schema_by_urn(self, urn: URN | str) -> SchemaMetadata | None:
         parsed = URN.parse(urn)
-        with translate_database_errors("get_schema_by_urn"), self._session_factory() as session:
-            record = session.scalar(select(SchemaRecord).where(SchemaRecord.urn == str(parsed)))
+        with translate_database_errors("get_schema_by_urn"), self._read_session() as session:
+            record = session.scalar(
+                select(SchemaRecord).where(
+                    SchemaRecord.workspace_id == self._workspace_id,
+                    SchemaRecord.urn == str(parsed),
+                )
+            )
             return record_to_schema(record) if record is not None else None
 
     def list_schemas(self, dataset_id: str) -> list[SchemaMetadata]:
         statement = (
             select(SchemaRecord)
-            .where(SchemaRecord.dataset_id == dataset_id.strip())
+            .where(
+                SchemaRecord.workspace_id == self._workspace_id,
+                SchemaRecord.dataset_id == dataset_id.strip(),
+            )
             .order_by(SchemaRecord.version, SchemaRecord.namespace)
         )
-        with translate_database_errors("list_schemas"), self._session_factory() as session:
+        with translate_database_errors("list_schemas"), self._read_session() as session:
             return [record_to_schema(record) for record in session.scalars(statement)]
 
     # ------------------------------------------------------------------
@@ -146,39 +159,46 @@ class SqlAlchemySchemaRepository(SqlAlchemyRepositoryBase, SchemaRepository):
     def _insert_schema(self, session: Session, schema: SchemaMetadata) -> None:
         """Insert ``schema`` and sync the dataset's ``latest_schema_version`` in one transaction."""
         clash = session.scalar(
-            select(SchemaRecord.id)
+            select(SchemaRecord.schema_id)
             .where(
+                SchemaRecord.workspace_id == self._workspace_id,
                 or_(
                     and_(
                         SchemaRecord.dataset_id == schema.dataset_id,
                         SchemaRecord.version == schema.version,
                     ),
                     SchemaRecord.urn == str(schema.urn),
-                )
+                ),
             )
             .limit(1)
         )
         if clash is not None:
             raise self._schema_conflict(schema)
 
-        session.add(schema_to_record(schema))
+        session.add(schema_to_record(schema, workspace_id=self._workspace_id))
         session.flush()
         self._sync_dataset_latest_version(session, schema)
 
-    @staticmethod
-    def _sync_dataset_latest_version(session: Session, schema: SchemaMetadata) -> None:
+    def _sync_dataset_latest_version(self, session: Session, schema: SchemaMetadata) -> None:
         dataset = session.scalar(
-            select(DatasetRecord).where(DatasetRecord.dataset_id == schema.dataset_id)
+            select(DatasetRecord).where(
+                DatasetRecord.workspace_id == self._workspace_id,
+                DatasetRecord.dataset_id == schema.dataset_id,
+            )
         )
         if dataset is not None and schema.version > (dataset.latest_schema_version or 0):
             dataset.latest_schema_version = schema.version
             dataset.updated_at = datetime.now(UTC)
 
     def _version_exists(self, dataset_id: str, version: int) -> bool:
-        with translate_database_errors("schema_version_exists"), self._session_factory() as session:
+        with translate_database_errors("schema_version_exists"), self._read_session() as session:
             found = session.scalar(
-                select(SchemaRecord.id)
-                .where(SchemaRecord.dataset_id == dataset_id, SchemaRecord.version == version)
+                select(SchemaRecord.schema_id)
+                .where(
+                    SchemaRecord.workspace_id == self._workspace_id,
+                    SchemaRecord.dataset_id == dataset_id,
+                    SchemaRecord.version == version,
+                )
                 .limit(1)
             )
             return found is not None
